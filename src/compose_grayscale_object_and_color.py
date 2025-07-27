@@ -9,6 +9,7 @@ then fusing their score estimates at sampling time will produce a digit in the d
  even for digit–color pairs unseen during training.
 """
 import torch
+import yaml
 import argparse
 import torch.nn as nn
 import torch.nn.functional as F
@@ -156,6 +157,36 @@ class GrayscaleMNIST(Dataset):
         final_image = (image_tensor.repeat(3, 1, 1) * 2) - 1
         return final_image, label
 
+class RandomlyColoredMNIST(Dataset):
+    """
+    MNIST dataset where each digit is given a random color,
+    forcing the model to learn shape independent of color.
+    """
+    def __init__(self, image_size, target_digits):
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor()
+        ])
+        mnist = datasets.MNIST(root='./data', train=True, download=True)
+        self.indices = [i for i, (_, label) in enumerate(mnist) if label in target_digits]
+        self.mnist_dataset = mnist
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        image, label = self.mnist_dataset[self.indices[idx]]
+        image_tensor = self.transform(image) # This is a 1-channel tensor [1, H, W]
+
+        # Generate a random color
+        random_color = torch.rand(3, 1, 1) # [3, 1, 1] tensor for R, G, B
+
+        # Apply the color to the digit (which is where image_tensor > 0)
+        colored_image = image_tensor.repeat(3, 1, 1) * random_color
+
+        # Normalize to [-1, 1]
+        final_image = (colored_image * 2) - 1
+        return final_image, label
 
 class SimpleShapesDataset(Dataset):
     """A synthetic dataset of simple, solid-colored shapes."""
@@ -334,9 +365,14 @@ class SuperDiffSampler:
 # ==============================================================================
 # 4. EXPERIMENT EXECUTION
 # ==============================================================================
-# ==============================================================================
-# 4. EXPERIMENT EXECUTION
-# ==============================================================================
+def save_config_to_yaml(config, log_dir):
+    """Saves the configuration Box object to a YAML file."""
+    config_path = Path(log_dir) / f'{config.experiment.name}_{config.experiment.run}.yml'
+    with open(config_path, 'w') as f:
+        # Convert Box object to a standard dict for clean YAML output
+        yaml.dump(config.to_dict(), f, default_flow_style=False)
+    print(f"Configuration saved to {config_path}")
+
 def visualize_results(samples_a, samples_b, superdiff_samples, ckpt_mgr):
     """Saves a grid comparing the three sets of samples to the correct directory."""
     def norm(s): return (s.clamp(-1, 1) + 1) / 2
@@ -424,20 +460,28 @@ def main(args):
             "batch_size": 8
         }
     })
+    # --- Save configuration to YAML ---
+    save_config_to_yaml(cfg, log_dir)
 
     print(f"--- 🧪 RUNNING EXPERIMENT: {args.exp_name} | RUN ID: {args.run_id} ---")
 
     # --- Corrected Dataset Initialization ---
 
-    # Create Dataset A
     print(f"Initializing dataset A: {cfg.dataset.dataset_a}")
     if cfg.dataset.dataset_a == 'GrayscaleMNIST':
         dataset_A = GrayscaleMNIST(
             image_size=cfg.dataset.image_size,
             target_digits=cfg.dataset.content_digit
         )
-        # Match the number of color samples to the number of digit samples
         num_style_samples = len(dataset_A)
+    # --- ADD THIS NEW CONDITION ---
+    elif cfg.dataset.dataset_a == 'RandomlyColoredMNIST':
+        dataset_A = RandomlyColoredMNIST(
+            image_size=cfg.dataset.image_size,
+            target_digits=cfg.dataset.content_digit
+        )
+        num_style_samples = len(dataset_A)
+    # -----------------------------
     elif cfg.dataset.dataset_a == 'SimpleShapesDataset':
         num_style_samples = cfg.dataset.num_samples_color
         dataset_A = SimpleShapesDataset(
@@ -505,8 +549,8 @@ if __name__ == '__main__':
     parser.add_argument("--run_id", type=str, required=True, help="A unique ID for the current run.")
     parser.add_argument("--project_name", type=str, default="mini-composable-diffusion-model",
                         help="Name of the project directory.")
-    parser.add_argument("--dataset_a", type=str, default="GrayscaleMNIST",
-                        choices=["GrayscaleMNIST", "SimpleShapesDataset"],
+    parser.add_argument("--dataset_a", type=str, default="RandomlyColoredMNIST",  # Changed default
+                        choices=["GrayscaleMNIST", "SimpleShapesDataset", "RandomlyColoredMNIST"],
                         help="Dataset for the first model (content).")
     parser.add_argument("--dataset_b", type=str, default="SimpleShapesDataset",
                         choices=["GrayscaleMNIST", "SimpleShapesDataset"], help="Dataset for the second model (style).")
