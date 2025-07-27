@@ -1,3 +1,4 @@
+import argparse
 
 import torch
 import torch.nn as nn
@@ -11,6 +12,8 @@ from pathlib import Path
 from torchvision.utils import save_image, make_grid
 from tqdm.auto import tqdm
 import numpy as np
+
+from src.utils.tools import is_cluster, save_config_to_yaml, CheckpointManager, tiny_subset
 
 
 # ==============================================================================
@@ -33,6 +36,7 @@ class VPSDE:
         self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
         self.posterior_variance = self.betas * (1. - self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
 
+
 class Block(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, time_emb_dim: int, up: bool = False):
         super().__init__()
@@ -47,6 +51,7 @@ class Block(nn.Module):
         self.bnorm1 = nn.BatchNorm2d(out_ch)
         self.bnorm2 = nn.BatchNorm2d(out_ch)
         self.relu = nn.ReLU()
+
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         h = self.bnorm1(self.relu(self.conv1(x)))
         time_emb = self.relu(self.time_mlp(t))
@@ -54,6 +59,7 @@ class Block(nn.Module):
         h = h + time_emb
         h = self.bnorm2(self.relu(self.conv2(h)))
         return self.transform(h)
+
 
 class ConvBlock(nn.Module):
     def __init__(self, in_ch: int, out_ch: int, time_emb_dim: int):
@@ -64,6 +70,7 @@ class ConvBlock(nn.Module):
         self.bnorm1 = nn.BatchNorm2d(out_ch)
         self.bnorm2 = nn.BatchNorm2d(out_ch)
         self.relu = nn.ReLU()
+
     def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         h = self.bnorm1(self.relu(self.conv1(x)))
         time_emb = self.relu(self.time_mlp(t))
@@ -71,6 +78,7 @@ class ConvBlock(nn.Module):
         h = h + time_emb
         h = self.bnorm2(self.relu(self.conv2(h)))
         return h
+
 
 class SinusoidalPosEmb(nn.Module):
     def __init__(self, dim: int):
@@ -142,7 +150,7 @@ class ColoredMNIST(Dataset):
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
         ])
-        self.mnist_dataset = datasets.MNIST(root='../../data', train=True, download=True)
+        self.mnist_dataset = datasets.MNIST(root='./data', train=True, download=True)
         self.target_digits = target_digits
         if self.target_digits:
             self.indices = [i for i, (_, label) in enumerate(self.mnist_dataset) if label in self.target_digits]
@@ -192,28 +200,7 @@ class ColoredMNIST(Dataset):
 # 3. TRAINING AND SAMPLING (Mostly Unchanged)
 # ==============================================================================
 
-class CheckpointManager:
-    """A simple checkpoint manager."""
-
-    def __init__(self, checkpoint_dir):
-        self.checkpoint_dir = Path(checkpoint_dir)
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    def save(self, model, model_name):
-        save_path = self.checkpoint_dir / f"{model_name}.pth"
-        torch.save(model.state_dict(), save_path)
-        print(f"Saved model checkpoint to {save_path}")
-
-    def load(self, model, model_name, device):
-        load_path = self.checkpoint_dir / f"{model_name}.pth"
-        if not load_path.exists():
-            raise FileNotFoundError(f"Checkpoint {load_path} not found.")
-        model.load_state_dict(torch.load(load_path, map_location=device))
-        print(f"Loaded model checkpoint from {load_path}")
-        return model
-
-
-def train(cfg, model, vpsde_sampler, sde, train_loader, device, model_name, ckpt_mgr):
+def train(cfg, model, vpsde_sampler, sde, train_loader, device, model_name, ckpt_mgr, results_dir):
     """Simplified training loop."""
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.optimizer.params.lr)
     print(f"--- Starting Training for {model_name} ---")
@@ -236,13 +223,13 @@ def train(cfg, model, vpsde_sampler, sde, train_loader, device, model_name, ckpt
             model.eval()
             shape = (cfg.dataset.channels, cfg.dataset.image_size, cfg.dataset.image_size)
             generated_image = vpsde_sampler.sample_single_model(model, cfg.sampling.batch_size, shape, device)
-            OUTPUT_DIR = f"visualizations/{cfg.exp_name}/composing_colored_mnist"
-            samples_dir: Path = Path(OUTPUT_DIR) / model_name / f"epoch_{epoch}"
-            samples_dir.mkdir(parents=True, exist_ok=True)
-            for(i, img) in enumerate(generated_image[:4]):
+
+            path_a: Path = results_dir / model_name / f"epoch_{epoch}"
+            path_a.mkdir(parents=True, exist_ok=True)
+            for (i, img) in enumerate(generated_image[:4]):
                 img = img.detach().cpu().clamp(-1, 1)
                 img = (img + 1) / 2  # map [-1,1] -> [0,1]
-                save_image(img, samples_dir / Path(f"{cfg.PREFIX}_{i:03d}.png"), normalize=False)
+                save_image(img, path_a / Path(f"{cfg.experiment.name}_epoch_{epoch}_sample_{i:03d}.png"), normalize=False)
     print(f"--- Finished Training for {model_name} ---")
     ckpt_mgr.save(model, model_name)
 
@@ -359,24 +346,47 @@ def visualize_results(samples_a, samples_b, superdiff_samples, output_path):
     print(f"Saved final comparison to {output_path}")
 
 
-if __name__ == '__main__':
+def main(args):
     # --- Global Setup ---
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    dirs = {'ckpt': Path('./checkpoints'), 'viz': Path('./visualizations')}
-    dirs['ckpt'].mkdir(exist_ok=True);
-    dirs['viz'].mkdir(exist_ok=True)
-    ckpt_mgr = CheckpointManager(checkpoint_dir=dirs['ckpt'])
+
+    # --- Create structured directories ---
+    base_path = f"/gluster/mmolefe/PhD/{args.project_name}" if is_cluster() else "./"
+    base_dir = Path(base_path)
+    ckpt_mgr = CheckpointManager(base_dir, args.exp_name, args.run_id)
+
+    # Create a log directory
+    log_dir = base_dir / args.exp_name / args.run_id / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Logs will be saved in: {log_dir}")
+
+    # Create a log directory
+    results_dir = base_dir / args.exp_name / args.run_id / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Results will be saved in: {results_dir}")
+
     sde = VPSDE(device=device)
     vpsde_sampler = SuperDiffSampler(sde)
     # --- Experiment-Specific Configurations ---
     if EXPERIMENT_TO_RUN.upper() == 'CIFAR10':
         cfg = Box({
-            "exp_name": "cifar10_split",
+            "experiment": {
+                "name": args.exp_name,
+                "run": args.run_id,
+            },
             "dataset": {"image_size": 32, "channels": 3, "split_A_classes": list(range(5)),
                         "split_B_classes": list(range(5, 10))},
-            "training": {"do_train": True, "epochs": 10, "batch_size": 64}, "optimizer": {"params": {"lr": 2e-4}},
+            "training": {"do_train": True,
+                         "epochs": 1 if args.sanity else 100,
+                         "log_every_epoch": 1 if args.sanity else 20,
+                         "sanity_num_examples": 8,
+                         "batch_size": 4 if args.sanity else 64
+                         }, "optimizer": {"params": {"lr": 2e-4}},
             "sampling": {"batch_size": 8, "temp": 1.0}
         })
+        # --- Save configuration to YAML ---
+
+        save_config_to_yaml(cfg, log_dir)
         print("--- RUNNING CIFAR-10 EXPERIMENT ---")
         loader_A = get_cifar10_split_loader(cfg.dataset.split_A_classes, cfg.training.batch_size,
                                             cfg.dataset.image_size)
@@ -385,16 +395,30 @@ if __name__ == '__main__':
 
     elif EXPERIMENT_TO_RUN.upper() == 'MNIST':
         cfg = Box({
-            "exp_name": "mnist_colored",
+            "experiment": {
+                "name": args.exp_name,
+                "run": args.run_id,
+            },
             "dataset": {"image_size": 32, "channels": 3, "split_A_digit": [6], "split_B_digit": [2]},
             "PREFIX": "samples",
             # Red 6s and Green 2s
-            "training": {"do_train": True, "epochs": 1, "batch_size": 128}, "optimizer": {"params": {"lr": 2e-4}},
+            "training": {"do_train": True,
+                         "epochs": 1 if args.sanity else 100,
+                         "log_every_epoch": 1 if args.sanity else 20,
+                         "sanity_num_examples": 8,
+                         "batch_size": 4 if args.sanity else 128
+
+                         }, "optimizer": {"params": {"lr": 2e-4}},
             "sampling": {"batch_size": 8, "temp": 1.0}
         })
         print("--- RUNNING COLORED MNIST EXPERIMENT ---")
         dataset_A = ColoredMNIST(cfg.dataset.image_size, target_digits=cfg.dataset.split_A_digit)
         dataset_B = ColoredMNIST(cfg.dataset.image_size, target_digits=cfg.dataset.split_B_digit)
+
+        if args.sanity:
+            dataset_A = tiny_subset(dataset_A, cfg.training.sanity_num_examples)
+            dataset_B = tiny_subset(dataset_B, cfg.training.sanity_num_examples)
+
         loader_A = DataLoader(dataset_A, batch_size=cfg.training.batch_size, shuffle=True)
         loader_B = DataLoader(dataset_B, batch_size=cfg.training.batch_size, shuffle=True)
 
@@ -404,13 +428,13 @@ if __name__ == '__main__':
     # --- Model Initialization ---
     model_A = ColoredMNISTScoreModel(in_channels=cfg.dataset.channels).to(device)
     model_B = ColoredMNISTScoreModel(in_channels=cfg.dataset.channels).to(device)
-    model_A_name = f"digit_6_model_A_{cfg.exp_name}"
-    model_B_name = f"digit_2_model_B_{cfg.exp_name}"
+    model_A_name = f"digit_6_model_A_{cfg.experiment.name}"
+    model_B_name = f"digit_2_model_B_{cfg.experiment.name}"
 
     # --- Training Phase ---
     if cfg.training.do_train:
-        train(cfg, model_A, vpsde_sampler, sde, loader_A, device, model_A_name, ckpt_mgr)
-        train(cfg, model_B, vpsde_sampler, sde, loader_B, device, model_B_name, ckpt_mgr)
+        train(cfg, model_A, vpsde_sampler, sde, loader_A, device, model_A_name, ckpt_mgr, results_dir)
+        train(cfg, model_B, vpsde_sampler, sde, loader_B, device, model_B_name, ckpt_mgr, results_dir)
 
     # --- Inference and Composition Phase ---
     print("\n--- Starting Inference Phase ---")
@@ -425,9 +449,24 @@ if __name__ == '__main__':
 
     samples_A = vpsde_sampler.sample_single_model(model_A, cfg.sampling.batch_size, shape, device)
     samples_B = vpsde_sampler.sample_single_model(model_B, cfg.sampling.batch_size, shape, device)
-    superdiff_samples = vpsde_sampler.sample(model_A, model_B, cfg.sampling.batch_size, shape, device, 'OR',
+    superdiff_samples = vpsde_sampler.sample(model_A, model_B, cfg.sampling.batch_size, shape, device, args.operation,
                                              temp=cfg.sampling.temp)
 
     # --- Visualization ---
-    output_path = dirs['viz'] / f"experiment_{cfg.exp_name}_results.png"
-    visualize_results(samples_A, samples_B, superdiff_samples, output_path)
+    path_comp = ckpt_mgr.get_path('results') / "composition"
+    path_comp.mkdir(parents=True, exist_ok=True)
+    visualize_results(samples_A, samples_B, superdiff_samples, path_comp / "composition_final.png")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Compose two diffusion models.")
+    parser.add_argument("--exp_name", type=str, required=True, help="Name of the experiment.")
+    parser.add_argument("--run_id", type=str, required=True, help="A unique ID for the current run.")
+    parser.add_argument("--project_name", type=str, default="mini-composable-diffusion-model",
+                        help="Name of the project directory.")
+    parser.add_argument("--operation", type=str, default="OR",choices=["OR", "AND"])
+    parser.add_argument("--sanity", action='store_true',
+                        help="Run sanity checks to ensure that the model is running")
+
+    args = parser.parse_args()
+    main(args)
