@@ -245,7 +245,7 @@ def train(cfg, model, sde, train_loader, device, model_name, ckpt_mgr, results_d
             for (i, img) in enumerate(samples[:4]):
                 img = img.detach().cpu().clamp(-1, 1)
                 img = (img + 1) / 2  # map [-1,1] -> [0,1]
-                save_image(img, path_a / Path(f"sample_{i:03d}.png"), normalize=False)
+                save_image(img, path_a / Path(f"{cfg.experiment.name}_epoch_{epoch}_sample_{i:03d}.png"), normalize=False)
 
 
     print(f"--- Finished Training for {model_name} ---")
@@ -397,6 +397,10 @@ def main(args):
     sde = VPSDE(device=device)
 
     cfg = Box({
+        "experiment": {
+            "name": args.exp_name,
+            "run": args.run_id,
+        },
         "dataset": {
             "image_size": 32,
             "channels": 3,
