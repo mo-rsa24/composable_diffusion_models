@@ -9,11 +9,10 @@ then fusing their score estimates at sampling time will produce a digit in the d
  even for digit–color pairs unseen during training.
 """
 import torch
-import yaml
 import argparse
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 import torchvision
 from box import Box
@@ -21,119 +20,12 @@ import math
 from pathlib import Path
 from tqdm.auto import tqdm
 import numpy as np
-from torchvision.utils import save_image
-
+from src.diffusion.samplers import SuperDiffSampler
+from src.models.compose_grayscale_object_and_color import ColoredMNISTScoreModel, VPSDE
+from src.utils.tools import save_config_to_yaml, is_cluster, tiny_subset, CheckpointManager
+from src.utils.visualization import visualize_training_epoch
 
 model_A_name, model_B_name = "Object", "Color"
-
-# ==============================================================================
-# 1. MODEL AND SDE DEFINITIONS (Unchanged)
-# ==============================================================================
-# (VPSDE, SinusoidalPosEmb, ColoredMNISTScoreModel, etc. are included here)
-class VPSDE:
-    def __init__(self, beta_min: float = 0.0001, beta_max: float = 0.02, num_timesteps: int = 1000, device='cpu'):
-        self.beta_min, self.beta_max, self.num_timesteps, self.device = beta_min, beta_max, num_timesteps, device
-        self.betas = torch.linspace(beta_min, beta_max, num_timesteps, device=device)
-        self.alphas = 1. - self.betas
-        self.alphas_cumprod = torch.cumprod(self.alphas, axis=0)
-        self.alphas_cumprod_prev = torch.cat([torch.tensor([1.0], device=device), self.alphas_cumprod[:-1]])
-        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
-        self.posterior_variance = self.betas * (1. - self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
-
-
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, time: torch.Tensor) -> torch.Tensor:
-        device = time.device
-        half_dim = self.dim // 2
-        embeddings = math.log(10000) / (half_dim - 1)
-        embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
-        embeddings = time[:, None] * embeddings[None, :]
-        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
-        return embeddings
-
-
-class Block(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, time_emb_dim: int, up: bool = False):
-        super().__init__()
-        self.time_mlp = nn.Linear(time_emb_dim, out_ch)
-        if up:
-            self.conv1 = nn.Conv2d(2 * in_ch, out_ch, 3, padding=1)
-            self.transform = nn.ConvTranspose2d(out_ch, out_ch,
-                                                                                                         4, 2, 1)
-        else:
-            self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-            self.transform = nn.Conv2d(out_ch, out_ch, 4, 2, 1)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
-        self.bnorm1 = nn.BatchNorm2d(out_ch)
-        self.bnorm2 = nn.BatchNorm2d(out_ch)
-        self.relu = nn.ReLU()
-
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        h = self.bnorm1(self.relu(self.conv1(x)))
-        time_emb = self.relu(self.time_mlp(t))
-        time_emb = time_emb[(...,) + (None,) * 2]
-        h = h + time_emb
-        h = self.bnorm2(self.relu(self.conv2(h)))
-        return self.transform(h)
-
-
-class ConvBlock(nn.Module):
-    def __init__(self, in_ch: int, out_ch: int, time_emb_dim: int):
-        super().__init__()
-        self.time_mlp = nn.Linear(time_emb_dim, out_ch)
-        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
-        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
-        self.bnorm1 = nn.BatchNorm2d(out_ch)
-        self.bnorm2 = nn.BatchNorm2d(out_ch)
-        self.relu = nn.ReLU()
-
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        h = self.bnorm1(self.relu(self.conv1(x)))
-        time_emb = self.relu(self.time_mlp(t))
-        time_emb = time_emb[(...,) + (None,) * 2]
-        h = h + time_emb
-        h = self.bnorm2(self.relu(self.conv2(h)))
-        return h
-
-
-class ColoredMNISTScoreModel(nn.Module):
-    def __init__(self, in_channels: int = 3, time_emb_dim: int = 32):
-        super().__init__()
-        self.time_mlp = nn.Sequential(SinusoidalPosEmb(time_emb_dim), nn.Linear(time_emb_dim, time_emb_dim * 4),
-                                      nn.ReLU(), nn.Linear(time_emb_dim * 4, time_emb_dim))
-        self.initial_conv = nn.Conv2d(in_channels, 32, 3, padding=1)
-        self.down1 = Block(32, 64, time_emb_dim)
-        self.down2 = Block(64, 128, time_emb_dim)
-        self.bot1 = Block(128, 256, time_emb_dim)
-        self.up_transpose_1 = nn.ConvTranspose2d(256, 128, 4, 2, 1)
-        self.up_block_1 = ConvBlock(256, 128, time_emb_dim)
-        self.up_transpose_2 = nn.ConvTranspose2d(128, 64, 4, 2, 1)
-        self.up_block_2 = ConvBlock(128, 64, time_emb_dim)
-        self.up_transpose_3 = nn.ConvTranspose2d(64, 32, 4, 2, 1)
-        self.up_block_3 = ConvBlock(64, 32, time_emb_dim)
-        self.output = nn.Conv2d(32, in_channels, 1)
-
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        t_emb = self.time_mlp(t)
-        x1 = self.initial_conv(x)
-        x2 = self.down1(x1, t_emb)
-        x3 = self.down2(x2, t_emb)
-        x_bot = self.bot1(x3, t_emb)
-        u1 = self.up_transpose_1(x_bot)
-        u1_cat = torch.cat([u1, x3], dim=1)
-        u1_out = self.up_block_1(u1_cat, t_emb)
-        u2 = self.up_transpose_2(u1_out)
-        u2_cat = torch.cat([u2, x2], dim=1)
-        u2_out = self.up_block_2(u2_cat, t_emb)
-        u3 = self.up_transpose_3(u2_out)
-        u3_cat = torch.cat([u3, x1], dim=1)
-        u3_out = self.up_block_3(u3_cat, t_emb)
-        return self.output(u3_out)
 
 
 # ==============================================================================
@@ -219,32 +111,6 @@ def get_dataset(name, image_size, **kwargs):
 # ==============================================================================
 # 3. TRAINING AND SAMPLING (Mostly Unchanged)
 # ==============================================================================
-
-class CheckpointManager:
-    """A simple checkpoint manager that saves to a structured directory."""
-
-    def __init__(self, base_dir, exp_name, run_id):
-        self.base_dir = Path(base_dir) / exp_name / run_id
-
-    def get_path(self, type='checkpoints'):
-        path = self.base_dir  / type
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    def save(self, model, model_name, epoch=None):
-        filename = f"{model_name}_final.pth" if epoch is None else f"{model_name}_epoch_{epoch}.pth"
-        save_path = self.get_path('checkpoints') / filename
-        torch.save(model.state_dict(), save_path)
-        print(f"Saved model checkpoint to {save_path}")
-
-    def load(self, model, model_name, device, epoch=None):
-        filename = f"{model_name}_final.pth" if epoch is None else f"{model_name}_epoch_{epoch}.pth"
-        load_path = self.get_path('checkpoints') / filename
-        if not load_path.exists(): raise FileNotFoundError(f"Checkpoint {load_path} not found.")
-        model.load_state_dict(torch.load(load_path, map_location=device))
-        print(f"Loaded model checkpoint from {load_path}")
-        return model
-
 def train(cfg, model, sde, train_loader, device, model_name, ckpt_mgr, results_dir):
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.optimizer.params.lr)
     print(f"--- Starting Training for {model_name} ---")
@@ -263,115 +129,15 @@ def train(cfg, model, sde, train_loader, device, model_name, ckpt_mgr, results_d
             loss.backward()
             optimizer.step()
         if epoch % cfg.training.log_every_epoch == 0:
-            model.eval()
-            sampler = SuperDiffSampler(sde)
-            shape = (cfg.dataset.channels, cfg.dataset.image_size, cfg.dataset.image_size)
-            print("Generating samples from Model A (Content)...")
-            samples = sampler.sample_single_model(model, cfg.sampling.batch_size, shape, device)
-
-            path_a: Path = results_dir / model_name / f"epoch_{epoch}"
-            path_a.mkdir(parents=True, exist_ok=True)
-
-            print(f"Saved Model A samples to {path_a}")
-            for (i, img) in enumerate(samples[:4]):
-                img = img.detach().cpu().clamp(-1, 1)
-                img = (img + 1) / 2  # map [-1,1] -> [0,1]
-                save_image(img, path_a / Path(f"{cfg.experiment.name}_epoch_{epoch}_sample_{i:03d}.png"), normalize=False)
+            visualize_training_epoch(model, cfg, sde, device, results_dir, model_name, epoch)
 
 
     print(f"--- Finished Training for {model_name} ---")
     ckpt_mgr.save(model, model_name)
 
-
-class SuperDiffSampler:
-    """Implements the SUPERDIFF algorithm for composing two pre-trained models."""
-
-    def __init__(self, sde: VPSDE):
-        self.sde = sde
-
-    @torch.no_grad()
-    def sample(self, model1, model2, batch_size, shape, device, operation='OR', temp=1.0, bias=0.0):
-        model1.eval()
-        model2.eval()
-        x = torch.randn((batch_size, *shape), device=device)
-        log_q1 = torch.zeros(batch_size, device=device)
-        log_q2 = torch.zeros(batch_size, device=device)
-        timesteps = torch.arange(self.sde.num_timesteps - 1, -1, -1, device=device)
-        for i in tqdm(range(self.sde.num_timesteps), desc=f"SUPERDIFF Sampling ({operation})", leave=False):
-            t_idx = timesteps[i]
-            t = torch.full((batch_size,), t_idx, device=device, dtype=torch.long)
-            sqrt_one_minus_alpha_bar_t = self.sde.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1)
-            noise1, noise2 = model1(x, t.float()), model2(x, t.float())
-            score1, score2 = -noise1 / sqrt_one_minus_alpha_bar_t, -noise2 / sqrt_one_minus_alpha_bar_t
-            if operation.upper() == 'OR':
-                logits = torch.stack([log_q1, log_q2], dim=1)
-                kappas = F.softmax(temp * logits + bias, dim=1)
-                kappa1, kappa2 = kappas[:, 0].view(-1, 1, 1, 1), kappas[:, 1].view(-1, 1, 1, 1)
-            elif operation.upper() == 'AND':
-                # Heuristic to balance log-densities, pushing towards an equal density state.
-                # A rigorous implementation solves the linear system in Prop. 6 of the paper [cite: 207-210].
-                probs = F.softmax(torch.stack([-log_q1, -log_q2], dim=1), dim=1)
-                kappa1, kappa2 = probs[:, 0].view(-1, 1, 1, 1), probs[:, 1].view(-1, 1, 1, 1)
-            else:
-                kappa1, kappa2 = 0.5, 0.5
-            combined_score = kappa1 * score1 + kappa2 * score2
-            beta_t = self.sde.betas[t].view(-1, 1, 1, 1)
-            sqrt_alpha_t = torch.sqrt(self.sde.alphas[t]).view(-1, 1, 1, 1)
-            mean = (1 / sqrt_alpha_t) * (x + beta_t * combined_score)
-            if i < self.sde.num_timesteps - 1:
-                posterior_variance = self.sde.posterior_variance[t].view(-1, 1, 1, 1)
-                x_prev = mean + torch.sqrt(posterior_variance) * torch.randn_like(x)
-            else:
-                x_prev = mean
-            dx = x_prev - x
-            dtau = 1.0 / self.sde.num_timesteps
-            d = x.shape[1] * x.shape[2] * x.shape[3]
-            div_f = -0.5 * beta_t.squeeze() * d
-
-            def update_log_q(log_q, score):
-                term1 = torch.sum(dx * score, dim=[1, 2, 3])
-                f_term = -0.5 * beta_t * x
-                g_sq_term = beta_t
-                inner_prod_term = torch.sum((f_term - 0.5 * g_sq_term * score) * score, dim=[1, 2, 3])
-                return log_q + term1 + (div_f + inner_prod_term) * dtau
-
-            log_q1, log_q2 = update_log_q(log_q1, score1), update_log_q(log_q2, score2)
-            x = x_prev
-        return x.clamp(-1, 1)
-
-    @torch.no_grad()
-    def sample_single_model(self, model, batch_size, shape, device):
-        model.eval()
-        x = torch.randn((batch_size, *shape), device=device)
-        timesteps = torch.arange(self.sde.num_timesteps - 1, -1, -1, device=device)
-        for i in tqdm(range(self.sde.num_timesteps), desc="Single Model Sampling", leave=False):
-            t_idx = timesteps[i]
-            t = torch.full((batch_size,), t_idx, device=device, dtype=torch.long)
-            beta_t = self.sde.betas[t].view(-1, 1, 1, 1)
-            sqrt_alpha_t = torch.sqrt(self.sde.alphas[t]).view(-1, 1, 1, 1)
-            sqrt_one_minus_alpha_bar_t = self.sde.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1)
-            noise = model(x, t.float())
-            score = -noise / sqrt_one_minus_alpha_bar_t
-            mean = (1 / sqrt_alpha_t) * (x + beta_t * score)
-            if i < self.sde.num_timesteps - 1:
-                posterior_variance = self.sde.posterior_variance[t].view(-1, 1, 1, 1)
-                x_prev = mean + torch.sqrt(posterior_variance) * torch.randn_like(x)
-            else:
-                x_prev = mean
-            x = x_prev
-        return x.clamp(-1, 1)
-
-
 # ==============================================================================
 # 4. EXPERIMENT EXECUTION
 # ==============================================================================
-def save_config_to_yaml(config, log_dir):
-    """Saves the configuration Box object to a YAML file."""
-    config_path = Path(log_dir) / f'{config.experiment.name}_{config.experiment.run}.yml'
-    with open(config_path, 'w') as f:
-        # Convert Box object to a standard dict for clean YAML output
-        yaml.dump(config.to_dict(), f, default_flow_style=False)
-    print(f"Configuration saved to {config_path}")
 
 def visualize_results(samples_a, samples_b, superdiff_samples, ckpt_mgr):
     """Saves a grid comparing the three sets of samples to the correct directory."""
@@ -401,16 +167,6 @@ def visualize_results(samples_a, samples_b, superdiff_samples, ckpt_mgr):
         norm(samples_a), norm(samples_b), norm(superdiff_samples)
     ]), comparison_path / "comparison_grid.png" , nrow=samples_a.shape[0])
     print(f"Saved final comparison grid to {comparison_path} (Top: Model A, Middle: Model B, Bottom: Composed)")
-
-def is_cluster():
-    import socket, os
-    hostname = socket.gethostname()
-    return "mscluster" in hostname or "wits" in hostname or os.environ.get("IS_CLUSTER") == "1"
-
-def tiny_subset(dataset: Dataset, num_items: int = 8) -> Subset:
-    """Return a tiny subset of the dataset for quick overfitting checks."""
-    indices = list(range(min(len(dataset), num_items)))
-    return Subset(dataset, indices)
 
 def main(args):
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
