@@ -409,7 +409,7 @@ def main(args):
                          "batch_size": 4 if args.sanity else 128
 
                          }, "optimizer": {"params": {"lr": 2e-4}},
-            "sampling": {"batch_size": 8, "temp": 1.0}
+            "sampling": {"batch_size": 8, "temp": args.temp}
         })
         print("--- RUNNING COLORED MNIST EXPERIMENT ---")
         dataset_A = ColoredMNIST(cfg.dataset.image_size, target_digits=cfg.dataset.split_A_digit)
@@ -465,6 +465,7 @@ if __name__ == '__main__':
     parser.add_argument("--project_name", type=str, default="mini-composable-diffusion-model",
                         help="Name of the project directory.")
     parser.add_argument("--operation", type=str, default="OR",choices=["OR", "AND"])
+    parser.add_argument("--temp", type=float, default=1.0)
     parser.add_argument("--sanity", action='store_true',
                         help="Run sanity checks to ensure that the model is running")
 
