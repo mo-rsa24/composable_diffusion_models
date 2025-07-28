@@ -20,7 +20,7 @@ class Config:
     # VAE Config
     VAE_LATENT_DIMS = 10
     VAE_EPOCHS = 25
-    VAE_BETA = 8.0
+    VAE_BETA = 4.0
 
     # Latent Diffusion Config
     LDM_EPOCHS = 100
