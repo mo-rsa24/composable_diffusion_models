@@ -205,10 +205,10 @@ class ComposableLatentDiffusionMLP(nn.Module):
 
         # The model input combines the latent vector, time embedding, and label embedding
         self.model = nn.Sequential(
-            nn.Linear(latent_dim + 2 * time_emb_dim, 256), nn.ReLU(),
-            nn.Linear(256, 512), nn.ReLU(),
-            nn.Linear(512, 256), nn.ReLU(),
-            nn.Linear(256, latent_dim)
+            nn.Linear(latent_dim + 2 * time_emb_dim, 512), nn.ReLU(),
+            nn.Linear(512, 1024), nn.ReLU(),
+            nn.Linear(1024, 512), nn.ReLU(),
+            nn.Linear(512, latent_dim)
         )
 
     def forward(self, x, t, y):
