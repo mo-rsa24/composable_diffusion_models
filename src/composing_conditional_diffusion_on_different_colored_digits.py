@@ -276,11 +276,11 @@ class SimpleUnet(nn.Module):
 
 # --- 4. Training ---
 
-def train_model(cfg, model, sampler:Sampler, dataloader, optimizer, num_epochs, condition_type, model_name, device, ckpt_mgr, results_dir):
+def train_model(cfg, model, sampler:Sampler, dataloader, optimizer, condition_type, model_name, device, ckpt_mgr, results_dir):
     """Trains one of the specialist models."""
     print(f"--- Training {condition_type.upper()} model ---")
-    for epoch in range(num_epochs):
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}")
+    for epoch in range(1, cfg.training.epochs + 1):
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{cfg.training.epochs}")
         for step, (images, digit_labels, color_labels) in enumerate(progress_bar):
             optimizer.zero_grad()
 
@@ -424,8 +424,8 @@ def main(args):
     sampler = Sampler(cfg, device=device)
     model_A_name = f"Digit"
     model_B_name = f"Color"
-    train_model(cfg, digit_model, sampler,  dataloader, digit_optimizer, cfg.training.epochs, model_A_name, 'digit', device, ckpt_mgr, results_dir)
-    train_model(cfg, color_model, sampler, dataloader, color_optimizer, cfg.training.epochs, model_B_name, 'color', device, ckpt_mgr, results_dir)
+    train_model(cfg, digit_model, sampler,  dataloader, digit_optimizer, model_A_name, 'digit', device, ckpt_mgr, results_dir)
+    train_model(cfg, color_model, sampler, dataloader, color_optimizer, model_B_name, 'color', device, ckpt_mgr, results_dir)
 
     # --- 4. Perform Compositional Sampling ---
     print("\n--- Starting Compositional Sampling ---")
