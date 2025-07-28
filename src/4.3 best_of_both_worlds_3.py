@@ -35,7 +35,7 @@ class Config:
     ]
 
     LR = 1e-3
-    OUTPUT_DIR = "latent_diffusion_composition_output_part_2"
+    OUTPUT_DIR = "latent_diffusion_composition_output_part_3"
 
 
 os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
