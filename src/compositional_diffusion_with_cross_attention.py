@@ -1,43 +1,51 @@
+import argparse
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from torchvision.transforms import ToTensor, Resize, Grayscale, Normalize
+from torchvision.transforms import ToTensor, Resize, Normalize
 from torchvision.datasets import MNIST
 from torchvision.utils import save_image, make_grid
 from tqdm import tqdm
-import os
 import math
+
+from src.utils.tools import tiny_subset, CheckpointManager, is_cluster
 
 
 # --- Configuration ---
-class Config:
-    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-    IMG_SIZE = 32
-    BATCH_SIZE = 128
-    TIMESTEPS = 300
+class Configuration:
+    def __init__(self, exp_name: str, run:str , results_dir: Path, ckpt_mgr: CheckpointManager = None, lr: float = 2e-4, sanity: bool=False, device: str = 'cuda'):
+        self.DEVICE = device
+        self.sanity = sanity
+        self.sanity_num_examples = 8
+        self.ckpt_mgr = ckpt_mgr
+        self.exp_name = exp_name
+        self.run=run
 
-    NUM_EPOCHS = 1  # This model is more complex and needs more training
-    LR = 1e-4
+        self.IMG_SIZE = 32
+        self.BATCH_SIZE = 4 if self.sanity else 128
+        self.TIMESTEPS = 500
 
-    # Guidance and Composition Config
-    GUIDANCE_DROPOUT = 0.1  # Probability of dropping a condition during training
-    GUIDANCE_STRENGTH_SHAPE = 7.5
-    GUIDANCE_STRENGTH_COLOR = 7.5
+        self.NUM_EPOCHS = 1 if self.sanity else 400
+        self.LOG_EVERY_EPOCH = 1 if self.sanity else 20
+        self.LR = lr
 
-    # Model Config
-    EMBED_DIM = 128  # Dimension for embeddings and context
+        # Guidance and Composition Config
+        self.GUIDANCE_DROPOUT = 0.1  # Probability of dropping a condition during training
+        self.GUIDANCE_STRENGTH_SHAPE = 7.5
+        self.GUIDANCE_STRENGTH_COLOR = 7.5
 
-    OUTPUT_DIR = "compositional_diffusion_with_cross_attention"
-
-
-os.makedirs(Config.OUTPUT_DIR, exist_ok=True)
+        # Model Config
+        self.EMBED_DIM = 128  # Dimension for embeddings and context
+        self.OUTPUT_DIR: Path = results_dir
 
 
 # --- 1. Dataset ---
 # We use grayscale MNIST and provide the color as a separate label.
 class GrayscaleColorDataset(Dataset):
-    def __init__(self, train=True):
+    def __init__(self, Config: Configuration, train=True):
         self.mnist_dataset = MNIST(root="./data", train=train, download=True,
                                    transform=Resize((Config.IMG_SIZE, Config.IMG_SIZE)))
         self.colors = ['red', 'green', 'blue']
@@ -55,7 +63,7 @@ class GrayscaleColorDataset(Dataset):
         # Assign a color label. Can be random or based on digit.
         # Random assignment forces more robust learning.
         color_idx = torch.randint(0, len(self.colors), (1,)).item()
-
+        img_tensor = img_tensor.repeat(3, 1, 1)
         return img_tensor, torch.tensor(label), torch.tensor(color_idx)
 
 
@@ -134,7 +142,7 @@ class UNetBlock(nn.Module):
 
 
 class GuidedUNet(nn.Module):
-    def __init__(self, num_digits=10, num_colors=3, embed_dim=Config.EMBED_DIM):
+    def __init__(self, num_digits=10, num_colors=3, embed_dim=128):
         super().__init__()
         self.embed_dim = embed_dim
 
@@ -148,7 +156,7 @@ class GuidedUNet(nn.Module):
         self.time_mlp = nn.Sequential(SinusoidalPositionEmbeddings(embed_dim), nn.Linear(embed_dim, embed_dim),
                                       nn.SiLU())
 
-        self.init_conv = nn.Conv2d(1, 64, kernel_size=3, padding=1)
+        self.init_conv = nn.Conv2d(3, 64, kernel_size=3, padding=1)
 
         # Context dimension is twice the embed_dim (digit + color)
         context_dim = embed_dim * 2
@@ -201,23 +209,25 @@ class GuidedUNet(nn.Module):
 
 
 # --- 3. Diffusion Logic ---
-betas = torch.linspace(0.0001, 0.02, Config.TIMESTEPS)
-alphas = 1. - betas
-alphas_cumprod = torch.cumprod(alphas, axis=0)
-sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
-sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod).to(Config.DEVICE)
-sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod).to(Config.DEVICE)
+def get_coeff(Config: Configuration, beta_start: float = 0.0001, beta_end:float =0.02):
+    betas = torch.linspace(beta_start, beta_end, Config.TIMESTEPS)
+    alphas = 1. - betas
+    alphas_cumprod = torch.cumprod(alphas, axis=0)
+    sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
+    sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod).to(Config.DEVICE)
+    sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - alphas_cumprod).to(Config.DEVICE)
+    return alphas_cumprod, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod
 
-
-def q_sample(x_start, t, noise=None):
+def q_sample(Config: Configuration, x_start, t, noise=None):
     if noise is None: noise = torch.randn_like(x_start)
+    _, sqrt_alphas_cumprod, sqrt_one_minus_alphas_cumprod = get_coeff(Config)
     sqrt_a_t = sqrt_alphas_cumprod[t].view(-1, 1, 1, 1).to(Config.DEVICE)
     sqrt_1m_a_t = sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1).to(Config.DEVICE)
     return sqrt_a_t * x_start + sqrt_1m_a_t * noise
 
 
 # --- 4. Training ---
-def train(model, dataloader, optimizer):
+def train(Config: Configuration, model, dataloader, optimizer):
     for epoch in range(Config.NUM_EPOCHS):
         progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{Config.NUM_EPOCHS}")
         for imgs, digits, colors in progress_bar:
@@ -235,7 +245,7 @@ def train(model, dataloader, optimizer):
             target_rgb = imgs * target_colors.view(-1, 3, 1, 1)
 
             noise = torch.randn_like(target_rgb)
-            x_noisy = q_sample(imgs, t, torch.randn_like(imgs))  # Noise is added to grayscale
+            x_noisy = q_sample(Config, imgs, t, torch.randn_like(imgs))  # Noise is added to grayscale
 
             # Classifier-Free Guidance: Randomly drop conditions
             mask = torch.rand(digits.shape[0], device=Config.DEVICE) > Config.GUIDANCE_DROPOUT
@@ -244,7 +254,7 @@ def train(model, dataloader, optimizer):
             colors = torch.where(mask, colors, model.null_color_idx)
 
             predicted_noise_or_img = model(x_noisy, t, digits, colors)
-
+            # (torch.Size([4, 1, 32, 32]), torch.Size([4]), torch.Size([4]), torch.Size([4]))
             # Loss is calculated on the colored target
             loss = F.mse_loss(predicted_noise_or_img, target_rgb)
             loss.backward()
@@ -253,13 +263,12 @@ def train(model, dataloader, optimizer):
             progress_bar.set_postfix(loss=loss.item())
 
 
-# --- 5. Sampling (with Composition) ---
 @torch.no_grad()
-def sample_composed(model, digit, color_idx):
+def sample_composed(Config: Configuration, model, digit, color_idx):
     model.eval()
 
     # Start with noise (1 channel, as input is grayscale)
-    x = torch.randn((1, 1, Config.IMG_SIZE, Config.IMG_SIZE), device=Config.DEVICE)
+    x = torch.randn((1, 3, Config.IMG_SIZE, Config.IMG_SIZE), device=Config.DEVICE)
 
     # Prepare labels for all guidance scenarios
     digit_labels = torch.tensor([digit], device=Config.DEVICE)
@@ -290,11 +299,12 @@ def sample_composed(model, digit, color_idx):
         final_pred = pred_uncond + Config.GUIDANCE_STRENGTH_SHAPE * shape_guidance + Config.GUIDANCE_STRENGTH_COLOR * color_guidance
 
         # Denoise step (using DDIM for faster sampling)
+        alphas_cumprod, _, __ = get_coeff(Config)
         alpha_t = alphas_cumprod[i]
         alpha_t_prev = alphas_cumprod[i - 1] if i > 0 else torch.tensor(1.0)
 
         # Predict x0
-        pred_x0 = (x - torch.sqrt(1. - alpha_t) * final_pred) / torch.sqrt(alpha_t)
+        pred_x0 = final_pred
 
         # Get direction to x0
         dir_xt = torch.sqrt(1. - alpha_t_prev) * final_pred
@@ -306,24 +316,61 @@ def sample_composed(model, digit, color_idx):
 
 
 # --- Main Execution ---
-if __name__ == '__main__':
-    model = GuidedUNet().to(Config.DEVICE)
+def main(args):
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # --- Create structured directories ---
+    base_path = f"/gluster/mmolefe/PhD/{args.project_name}" if is_cluster() else "./"
+    base_dir = Path(base_path)
+    ckpt_mgr = CheckpointManager(base_dir, args.exp_name, args.run_id)
+
+    # Create a log directory
+    log_dir = base_dir / args.exp_name / args.run_id / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Logs will be saved in: {log_dir}")
+
+    # Create a log directory
+    results_dir = base_dir / args.exp_name / args.run_id / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Results will be saved in: {results_dir}")
+
+
+    Config = Configuration(args.exp_name, args.run_id, results_dir, ckpt_mgr, lr=args.lr, sanity=args.sanity, device=device)
+
+
+
+    model = GuidedUNet(embed_dim=Config.EMBED_DIM).to(Config.DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=Config.LR)
-    dataset = GrayscaleColorDataset(train=True)
+    dataset = GrayscaleColorDataset(Config, train=True)
+    if Config.sanity:
+        dataset = tiny_subset(dataset, Config.sanity_num_examples)
     dataloader = DataLoader(dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
 
     print("--- Training Guided Diffusion Model with Cross-Attention ---")
-    train(model, dataloader, optimizer)
+    train(Config, model, dataloader, optimizer)
 
     print("\n--- Generating Final Composition Grid ---")
     generated_images = []
     for digit in range(10):
         for color_idx in range(3):
             print(f"Generating Digit: {digit}, Color: {['Red', 'Green', 'Blue'][color_idx]}")
-            img = sample_composed(model, digit, color_idx)
+            img = sample_composed(Config, model, digit, color_idx)
             generated_images.append(img.cpu())
 
     grid = make_grid(torch.cat(generated_images), nrow=3)
-    output_path = os.path.join(Config.OUTPUT_DIR, "guided_composition_grid.png")
+    output_path = Config.OUTPUT_DIR /  "guided_composition_grid.png"
     save_image(grid, output_path)
     print(f"\n🎉 Final composition grid saved to {output_path}!")
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Compose two diffusion models.")
+    parser.add_argument("--exp_name", type=str, required=True, help="Name of the experiment.")
+    parser.add_argument("--run_id", type=str, required=True, help="A unique ID for the current run.")
+    parser.add_argument("--project_name", type=str, default="mini-composable-diffusion-model",
+                        help="Name of the project directory.")
+    parser.add_argument("--lr", type=float, default=2e-4)
+    parser.add_argument("--sanity", action='store_true',
+                        help="Run sanity checks to ensure that the model is running")
+
+    args = parser.parse_args()
+    main(args)
