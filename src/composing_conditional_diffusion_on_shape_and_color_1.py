@@ -25,7 +25,7 @@ class Config:
     COLORS = ["red", "green", "blue"]
     # Hold out a combination to test for true compositionality
     HOLDOUT_COMBINATION = ("triangle", "blue")
-    OUTPUT_DIR = f"src/scripts/mini-experiments/visualizations/{EXP_NAME}/composable_diffusion_output"
+    OUTPUT_DIR = f"src/scripts/mini-experiments/visualizations/{EXP_NAME}/composable_diffusion_output_part_2"
 
 
 # Create output directory
