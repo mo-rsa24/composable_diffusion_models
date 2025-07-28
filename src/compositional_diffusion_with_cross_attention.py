@@ -17,7 +17,7 @@ class Config:
     BATCH_SIZE = 128
     TIMESTEPS = 300
 
-    NUM_EPOCHS = 60  # This model is more complex and needs more training
+    NUM_EPOCHS = 1  # This model is more complex and needs more training
     LR = 1e-4
 
     # Guidance and Composition Config
