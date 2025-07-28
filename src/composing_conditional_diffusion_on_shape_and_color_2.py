@@ -332,7 +332,7 @@ def train_model(model, dataloader, optimizer, num_epochs, condition_type, debug:
             loss.backward()
             optimizer.step()
             progress_bar.set_postfix(loss=loss.item())
-        if epoch % Config.NUM_EPOCHS == 0:
+        if epoch % 50 == 0:
             model.eval()
             generated_image = sample_image(model, labels)
             samples_dir: Path = Path(Config.OUTPUT_DIR) / condition_type / f"epoch_{epoch}"
