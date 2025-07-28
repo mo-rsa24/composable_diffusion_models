@@ -219,7 +219,7 @@ def train(cfg, model, vpsde_sampler, sde, train_loader, device, model_name, ckpt
             loss = F.mse_loss(noise, predicted_noise)
             loss.backward();
             optimizer.step()
-        if epoch % cfg.training.epochs == 0:
+        if epoch % cfg.training.log_every_epoch == 0:
             model.eval()
             shape = (cfg.dataset.channels, cfg.dataset.image_size, cfg.dataset.image_size)
             generated_image = vpsde_sampler.sample_single_model(model, cfg.sampling.batch_size, shape, device)
