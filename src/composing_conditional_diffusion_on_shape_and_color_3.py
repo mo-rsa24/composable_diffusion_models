@@ -290,6 +290,15 @@ def train_model(model, dataloader, diffusion, optimizer, num_epochs, cond_type, 
             optimizer.step()
             total_loss += loss.item()
             progress_bar.set_postfix(loss=loss.item())
+        if epoch % 50 == 0:
+            model.eval()
+            generated_image = sample_image(model, diffusion, labels)
+            samples_dir: Path = Path(Config.OUTPUT_DIR) / cond_type / f"epoch_{epoch}"
+            samples_dir.mkdir(parents=True, exist_ok=True)
+            for(i, img) in enumerate(generated_image[:4]):
+                img = img.detach().cpu().clamp(-1, 1)
+                img = (img + 1) / 2  # map [-1,1] -> [0,1]
+                save_image(img, samples_dir / Path(f"{Config.PREFIX}_{i:03d}.png"), normalize=False)
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch + 1} Average Loss: {avg_loss:.4f}")
         if avg_loss < best_loss:
@@ -299,6 +308,35 @@ def train_model(model, dataloader, diffusion, optimizer, num_epochs, cond_type, 
 
 
 # --- 5. SUPERDIFF Sampling and Visualization ---
+@torch.no_grad()
+def sample_image(model: UNet, diffusion: DiffusionSDE, labels):
+    """Sample using the composed scores of the two models."""
+    print(f"Sampling Diffusion")
+
+    # Start from pure noise
+    img_size = Config.IMG_SIZE
+    img = torch.randn((1, 3, img_size, img_size), device=Config.DEVICE)
+
+    for i in tqdm(reversed(range(0, Config.TIMESTEPS)), desc="Diffusion Sampling", total=Config.TIMESTEPS):
+        t = torch.full((1,), i, device=Config.DEVICE, dtype=torch.long)
+        predicted_noise = model(img, t, labels)
+
+        alpha_t = diffusion.alphas[i]
+        alpha_cumprod_t = diffusion.alphas_cumprod[i]
+
+        coeff_img = 1.0 / torch.sqrt(alpha_t)
+        coeff_pred_noise = (1.0 - alpha_t) / torch.sqrt(1.0 - alpha_cumprod_t)
+
+        model_mean = coeff_img * (img - coeff_pred_noise * predicted_noise)
+
+        if i == 0:
+            img = model_mean
+        else:
+            posterior_variance_t = diffusion._extract(diffusion.posterior_variance, t, img.shape)
+            noise = torch.randn_like(img)
+            img = model_mean + torch.sqrt(posterior_variance_t) * noise
+
+    return img
 
 @torch.no_grad()
 def sample_superdiff(shape_model, color_model, diffusion,
@@ -483,11 +521,11 @@ if __name__ == '__main__':
     # --- Train Models ---
     shape_model = UNet(num_classes=len(config.SHAPES)).to(config.DEVICE)
     shape_optimizer = torch.optim.Adam(shape_model.parameters(), lr=config.LR)
-    train_model(shape_model, train_dataloader, diffusion, shape_optimizer, config.NUM_EPOCHS, 'shape', config)
+    train_model(shape_model, diffusion, train_dataloader, diffusion, shape_optimizer, config.NUM_EPOCHS, 'shape', config)
 
     color_model = UNet(num_classes=len(config.COLORS)).to(config.DEVICE)
     color_optimizer = torch.optim.Adam(color_model.parameters(), lr=config.LR)
-    train_model(color_model, train_dataloader, diffusion, color_optimizer, config.NUM_EPOCHS, 'color', config)
+    train_model(color_model, diffusion, train_dataloader, diffusion, color_optimizer, config.NUM_EPOCHS, 'color', config)
 
     # --- Load Best Models for Inference ---
     print("\n--- Loading best models for generation ---")
