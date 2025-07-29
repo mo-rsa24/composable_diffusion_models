@@ -10,16 +10,21 @@ from tqdm import tqdm
 import math
 import os
 
+from src.utils.tools import tiny_subset
+
 
 # --- Configuration (MODIFIED) ---
 class Config:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     EXP_NAME = "shape_and_color_paper_method"  # Changed experiment name
+    SANITY = True
+    SANITY_NUM_EXAMPLE = 8
     IMG_SIZE = 64
-    BATCH_SIZE = 128
+    BATCH_SIZE = 4 if SANITY else 128
     PREFIX = "samples"
     TIMESTEPS = 500
-    NUM_EPOCHS = 200
+    NUM_EPOCHS = 1 if SANITY else 200
+    LOG_EVERY_EPOCH = 1 if SANITY else 20
     LR = 1e-4
     SHAPES = ["circle", "square", "triangle"]
     COLORS = ["red", "green", "blue"]
@@ -28,7 +33,7 @@ class Config:
     # MODIFIED: Add probability for classifier-free guidance
     UNCOND_PROB = 0.1
 
-    OUTPUT_DIR = f"src/scripts/mini-experiments/visualizations/{EXP_NAME}/composable_diffusion_output_part_6"
+    OUTPUT_DIR = f"src/scripts/mini-experiments/visualizations/{EXP_NAME}/composable_diffusion_output_part_6_1"
 
 
 # Create output directory
@@ -91,13 +96,13 @@ class ShapesDataset(Dataset):
 
 # --- 2. Diffusion Logic (DDPM - No changes needed) ---
 
-def linear_beta_schedule(timesteps):
+def linear_beta_schedule(timesteps, device='cpu'):
     beta_start = 0.0001
     beta_end = 0.02
-    return torch.linspace(beta_start, beta_end, timesteps)
+    return torch.linspace(beta_start, beta_end, timesteps, device=device)
 
 
-betas = linear_beta_schedule(timesteps=Config.TIMESTEPS)
+betas = linear_beta_schedule(timesteps=Config.TIMESTEPS, device=Config.DEVICE)
 alphas = 1. - betas
 alphas_cumprod = torch.cumprod(alphas, axis=0)
 alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value=1.0)
@@ -109,7 +114,7 @@ posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 
 def extract(a, t, x_shape):
     batch_size = t.shape[0]
-    out = a.gather(-1, t.cpu())
+    out = a.gather(-1, t)
     return out.reshape(batch_size, *((1,) * (len(x_shape) - 1))).to(t.device)
 
 
@@ -218,7 +223,7 @@ class SimpleUnet(nn.Module):
 
 # --- 4. Training (MODIFIED) ---
 
-def train_model(model, dataloader, optimizer, num_epochs, condition_type, num_classes):
+def train_model(cfg: Config, model: SimpleUnet,  dataloader, optimizer, condition_type, num_classes):
     """
     MODIFIED: Trains a specialist model using classifier-free guidance.
     Labels are randomly replaced with a null token.
@@ -226,8 +231,8 @@ def train_model(model, dataloader, optimizer, num_epochs, condition_type, num_cl
     print(f"--- Training {condition_type.upper()} model with Classifier-Free Guidance ---")
     uncond_token_id = num_classes  # The unconditional token is the last one
 
-    for epoch in range(num_epochs):
-        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{num_epochs}")
+    for epoch in range(1, cfg.NUM_EPOCHS+1):
+        progress_bar = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{cfg.NUM_EPOCHS+1}")
         for step, (images, shape_labels, color_labels) in enumerate(progress_bar):
             optimizer.zero_grad()
             batch_size = images.shape[0]
@@ -246,7 +251,7 @@ def train_model(model, dataloader, optimizer, num_epochs, condition_type, num_cl
             loss.backward()
             optimizer.step()
             progress_bar.set_postfix(loss=loss.item())
-        if epoch % 20 == 0:
+        if epoch % cfg.LOG_EVERY_EPOCH == 0:
             model.eval()
             generated_image = sample_image(model, labels)
             samples_dir: Path = Path(Config.OUTPUT_DIR) / condition_type / f"epoch_{epoch}"
@@ -254,7 +259,7 @@ def train_model(model, dataloader, optimizer, num_epochs, condition_type, num_cl
             for(i, img) in enumerate(generated_image[:4]):
                 img = img.detach().cpu().clamp(-1, 1)
                 img = (img + 1) / 2  # map [-1,1] -> [0,1]
-                save_image(img, samples_dir / Path(f"{Config.PREFIX}_{i:03d}.png"), normalize=False)
+                save_image(img, samples_dir / Path(f"sample_{i:03d}.png"), normalize=False)
     print(f"--- Finished training {condition_type.upper()} model ---")
 
 @torch.no_grad()
@@ -311,8 +316,10 @@ def get_forward_process_params(t):
     # g_t^2 = 2 * sigma_t^2 * d/dt(log(sigma_t/alpha_t))
     # d/dt(log(sigma/alpha)) = d/dt(log(sigma)) - d/dt(log(alpha))
     log_sigma_t = 0.5 * torch.log(torch.tensor(sigma_t_sq))
-    log_sigma_t_prev = 0.5 * torch.log(torch.tensor(sigma_t_sq_prev)) if t > 0 else -float('inf')
+    # log_sigma_t_prev = 0.5 * torch.log(torch.tensor(sigma_t_sq_prev)) if t > 0 else -float('inf')
+    log_sigma_t_prev = 0.5 * torch.log(torch.tensor(sigma_t_sq_prev)) if t > 0 else torch.tensor(-float('inf'))
     d_log_sigma_dt = (log_sigma_t - log_sigma_t_prev) / dt if torch.isfinite(log_sigma_t_prev) else 0.0
+
 
     g_t_sq = 2 * sigma_t_sq * (d_log_sigma_dt - d_log_alpha_dt)
     g_t_sq = max(g_t_sq, 1e-8)  # Ensure g is non-zero
@@ -497,6 +504,8 @@ def sample_composed(shape_model, color_model, shape_idx, color_idx, w_shape=2.0,
 if __name__ == '__main__':
     # 1. Create Datasets and Dataloaders
     dataset = ShapesDataset(size=5000, holdout=Config.HOLDOUT_COMBINATION, train=True)
+    if Config.SANITY:
+        dataset = tiny_subset(dataset, Config.SANITY_NUM_EXAMPLE)
     dataloader = DataLoader(dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
 
     # 2. Initialize Models
@@ -508,10 +517,9 @@ if __name__ == '__main__':
     # 3. Train Models
     shape_optimizer = torch.optim.Adam(shape_model.parameters(), lr=Config.LR)
     color_optimizer = torch.optim.Adam(color_model.parameters(), lr=Config.LR)
+    train_model(Config, shape_model, dataloader, shape_optimizer, 'shape', num_shape_classes)
 
-    # MODIFIED: Pass num_classes to train_model
-    train_model(shape_model, dataloader, shape_optimizer, Config.NUM_EPOCHS, 'shape', num_shape_classes)
-    train_model(color_model, dataloader, color_optimizer, Config.NUM_EPOCHS, 'color', num_color_classes)
+    train_model(Config, color_model, dataloader, color_optimizer, 'color', num_color_classes)
 
     # --- 4. Perform Compositional Sampling ---
     print("\n--- Starting Compositional Sampling (Paper's Method) ---")
