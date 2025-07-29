@@ -298,7 +298,7 @@ def train_model(model, dataloader, diffusion,  optimizer, num_epochs, cond_type,
             for(i, img) in enumerate(generated_image[:4]):
                 img = img.detach().cpu().clamp(-1, 1)
                 img = (img + 1) / 2  # map [-1,1] -> [0,1]
-                save_image(img, samples_dir / Path(f"{Config.PREFIX}_{i:03d}.png"), normalize=False)
+                save_image(img, samples_dir / Path(f"samples_{i:03d}.png"), normalize=False)
         avg_loss = total_loss / len(dataloader)
         print(f"Epoch {epoch + 1} Average Loss: {avg_loss:.4f}")
         if avg_loss < best_loss:
