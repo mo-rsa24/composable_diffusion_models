@@ -273,7 +273,7 @@ class UNet(nn.Module):
 
 # --- 4. Training Function (Identical to previous version) ---
 
-def train_model(model, dataloader, diffusion, optimizer, num_epochs, cond_type, config):
+def train_model(model, dataloader, diffusion,  optimizer, num_epochs, cond_type, config):
     print(f"\n--- Training {cond_type.upper()} model ---")
     best_loss = float('inf')
     model_path = os.path.join(config.OUTPUT_DIR, f"best_{cond_type}_model.pth")
@@ -521,11 +521,10 @@ if __name__ == '__main__':
     # --- Train Models ---
     shape_model = UNet(num_classes=len(config.SHAPES)).to(config.DEVICE)
     shape_optimizer = torch.optim.Adam(shape_model.parameters(), lr=config.LR)
-    train_model(shape_model, diffusion, train_dataloader, diffusion, shape_optimizer, config.NUM_EPOCHS, 'shape', config)
-
+    train_model(shape_model, train_dataloader, diffusion, shape_optimizer, config.NUM_EPOCHS, 'shape', config)
     color_model = UNet(num_classes=len(config.COLORS)).to(config.DEVICE)
     color_optimizer = torch.optim.Adam(color_model.parameters(), lr=config.LR)
-    train_model(color_model, diffusion, train_dataloader, diffusion, color_optimizer, config.NUM_EPOCHS, 'color', config)
+    train_model(color_model, train_dataloader, diffusion, color_optimizer, config.NUM_EPOCHS, 'color', config)
 
     # --- Load Best Models for Inference ---
     print("\n--- Loading best models for generation ---")
