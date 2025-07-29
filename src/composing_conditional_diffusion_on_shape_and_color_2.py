@@ -23,8 +23,8 @@ class Config:
     # --- General Settings ---
     IMG_SIZE = 64
     BATCH_SIZE = 128
-    TIMESTEPS = 1000
-    NUM_EPOCHS = 500  # For good results, MNIST might need more epochs
+    TIMESTEPS = 200
+    NUM_EPOCHS = 200  # For good results, MNIST might need more epochs
     LR = 1e-4
     PREFIX = "samples"
 
