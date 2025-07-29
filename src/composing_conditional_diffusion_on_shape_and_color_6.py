@@ -17,7 +17,7 @@ from src.utils.tools import tiny_subset
 class Config:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     EXP_NAME = "shape_and_color_paper_method"  # Changed experiment name
-    SANITY = True
+    SANITY = False
     SANITY_NUM_EXAMPLE = 8
     IMG_SIZE = 64
     BATCH_SIZE = 4 if SANITY else 128
