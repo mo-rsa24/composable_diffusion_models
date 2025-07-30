@@ -33,7 +33,7 @@ class Config:
     # MODIFIED: Add probability for classifier-free guidance
     UNCOND_PROB = 0.1
 
-    OUTPUT_DIR = f"src/scripts/mini-experiments/visualizations/{EXP_NAME}/composable_diffusion_output_part_6_1"
+    OUTPUT_DIR = f"src/scripts/mini-experiments/visualizations/{EXP_NAME}/composable_diffusion_output_part_6_2"
 
 
 # Create output directory
