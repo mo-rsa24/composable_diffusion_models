@@ -17,7 +17,7 @@ from src.utils.tools import tiny_subset
 class Config:
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     EXP_NAME = "shape_and_color_paper_method"  # Changed experiment name
-    SANITY = False
+    SANITY = True
     SANITY_NUM_EXAMPLE = 8
     IMG_SIZE = 64
     BATCH_SIZE = 4 if SANITY else 128
@@ -328,103 +328,79 @@ def get_forward_process_params(t):
 
 
 @torch.no_grad()
-def sample_superdiff(shape_model, color_model, shape_idx, color_idx, mode='OR', T=1.0, l=0.0):
+def sample_superdiff(model1, model2, label1_idx, label2_idx, mode='OR', T=1.0, l=0.0):
     """
-    Sample using the SUPERDIFF algorithm. [cite: 10]
-    The 'AND' mode has been corrected according to the paper's appendix. [cite: 213]
+    Sample using the SUPERDIFF algorithm on two generic models.
     """
-    shape_name = Config.SHAPES[shape_idx]
-    color_name = Config.COLORS[color_idx]
-    print(f"Sampling with SUPERDIFF ({mode}): {shape_name} AND {color_name}")
+    print(f"Sampling with SUPERDIFF ({mode}) on two models.")
 
     img_size = Config.IMG_SIZE
     img = torch.randn((1, 3, img_size, img_size), device=Config.DEVICE)
-    d = 3 * img_size * img_size  # Dimensionality of the data
+    d = 3 * img_size * img_size
 
-    log_q_shape = torch.zeros(1, device=Config.DEVICE)
-    log_q_color = torch.zeros(1, device=Config.DEVICE)
-    shape_cond_label = torch.tensor([shape_idx], device=Config.DEVICE, dtype=torch.long)
-    color_cond_label = torch.tensor([color_idx], device=Config.DEVICE, dtype=torch.long)
+    log_q1 = torch.zeros(1, device=Config.DEVICE)
+    log_q2 = torch.zeros(1, device=Config.DEVICE)
+    cond_label1 = torch.tensor([label1_idx], device=Config.DEVICE, dtype=torch.long)
+    cond_label2 = torch.tensor([label2_idx], device=Config.DEVICE, dtype=torch.long)
 
-    models = [shape_model, color_model]
-    labels = [shape_cond_label, color_cond_label]
-    log_qs = [log_q_shape, log_q_color]
+    models = [model1, model2]
+    labels = [cond_label1, cond_label2]
+    log_qs = [log_q1, log_q2]
     num_models = len(models)
 
     for i in tqdm(reversed(range(0, Config.TIMESTEPS)), desc=f"SUPERDIFF ({mode}) Sampling", total=Config.TIMESTEPS):
         t = torch.full((1,), i, device=Config.DEVICE, dtype=torch.long)
         d_tau = 1.0 / Config.TIMESTEPS
 
-        # --- 1. Calculate Kappa (κ) weights ---
         kappa = torch.zeros(num_models, device=Config.DEVICE)
         pred_noises = [m(img, t, lab) for m, lab in zip(models, labels)]
         scores = [-p / extract(sqrt_one_minus_alphas_cumprod, t, p.shape) for p in pred_noises]
 
+        # *** FIX APPLIED HERE ***
+        # Moved these calculations to be available for both OR and AND modes,
+        # which is necessary for the log density update at the end of the loop.
+        f_t_coeff, g_t_sq = get_forward_process_params(t)
+        f_t = f_t_coeff * img
+        g_t = torch.sqrt(torch.tensor(g_t_sq, device=Config.DEVICE))
+        div_f = f_t_coeff * d
+        reverse_drifts = [-f_t + (g_t_sq / 2) * s for s in scores]
+        dW_noise = torch.randn_like(img) * torch.sqrt(torch.tensor(d_tau, device=Config.DEVICE))
+
         if mode == 'OR':
-            # OR operation: samples from a mixture of densities [cite: 54, 192]
-            # This logic remains the same. It uses the Itô density estimator to find weights.
-            # For simplicity, we can use a softmax on log densities as shown in Algorithm 1.
             log_q_tensor = torch.stack(log_qs)
             kappa = F.softmax(T * log_q_tensor.squeeze() + l, dim=0)
 
         elif mode == 'AND':
-            # AND operation: find weights (κ) that make the change in log-densities equal for all models. [cite: 204, 209]
-            # This is done by solving a system of M+1 linear equations. [cite: 210]
-
-            f_t_coeff, g_t_sq = get_forward_process_params(t)
-            f_t = f_t_coeff * img
-            g_t = torch.sqrt(torch.tensor(g_t_sq, device=Config.DEVICE))
-            div_f = f_t_coeff * d
-
-            # Individual model reverse drifts, u_j = -f_t + (g_t^2 / 2) * score_j
-            # Note: We use the reverse-time SDE from Prop. 1 for the drift.
-            reverse_drifts = [-f_t + (g_t_sq / 2) * s for s in scores]
-
-            # The formulas for the linear system Ax=B are from Appendix C.1 [cite: 213, 718, 720]
-            # a_ij = dτ * <u_j, score_i>
             a = torch.zeros(num_models, num_models, device=Config.DEVICE)
-            for r in range(num_models):  # Index i
-                for c in range(num_models):  # Index j
+            for r in range(num_models):
+                for c in range(num_models):
                     a[r, c] = d_tau * torch.sum(reverse_drifts[c] * scores[r])
 
-            # b_i = (<∇,f> + <f - (g²/2)score_i, score_i>)dτ + <g*dW, score_i>
-            dW_noise = torch.randn_like(img) * torch.sqrt(d_tau)  # The Wiener increment dW
             b = torch.zeros(num_models, device=Config.DEVICE)
-            for r in range(num_models):  # Index i
+            for r in range(num_models):
                 deterministic_part = d_tau * (div_f + torch.sum((f_t - (g_t_sq / 2) * scores[r]) * scores[r]))
                 stochastic_part = torch.sum(g_t * dW_noise * scores[r])
                 b[r] = deterministic_part + stochastic_part
 
-            # System of equations for M=2 models:
-            # (a_1 - a_2) · κ = b_2 - b_1
-            # κ_1 + κ_2 = 1
             A_mat = torch.tensor([
                 [(a[0, 0] - a[1, 0]).item(), (a[0, 1] - a[1, 1]).item()],
                 [1.0, 1.0]
             ], device=Config.DEVICE)
-
             B_vec = torch.tensor([(b[1] - b[0]).item(), 1.0], device=Config.DEVICE)
 
             try:
                 kappa = torch.linalg.solve(A_mat, B_vec)
-                kappa = torch.clamp(kappa, min=0, max=1.0)  # Clamp to be a valid probability
-                kappa /= torch.sum(kappa)  # Re-normalize
+                kappa = torch.clamp(kappa, min=0, max=1.0)
+                kappa /= torch.sum(kappa)
             except torch.linalg.LinAlgError:
-                # Fallback to equal weighting if system is singular.
                 kappa = torch.tensor([0.5, 0.5], device=Config.DEVICE)
         else:
             raise ValueError("Mode must be 'OR' or 'AND'")
 
-        # --- 2. Calculate Composed Score/Noise and Denoise ---
-        # The composed score is a weighted average of individual scores
         composed_score = kappa[0] * scores[0] + kappa[1] * scores[1]
-
-        # Denoise using the DDPM reverse process formula from your original code, but with the composed score
         betas_t = extract(betas, t, img.shape)
         sqrt_one_minus_alphas_cumprod_t = extract(sqrt_one_minus_alphas_cumprod, t, img.shape)
         sqrt_recip_alphas_t = extract(sqrt_recip_alphas, t, img.shape)
-
-        # Convert composed score back to composed noise to use the DDPM update rule
         composed_noise = -composed_score * sqrt_one_minus_alphas_cumprod_t
         model_mean = sqrt_recip_alphas_t * (img - betas_t * composed_noise / sqrt_one_minus_alphas_cumprod_t)
 
@@ -435,23 +411,16 @@ def sample_superdiff(shape_model, color_model, shape_idx, color_idx, mode='OR', 
             noise = torch.randn_like(img)
             img = model_mean + torch.sqrt(posterior_variance_t) * noise
 
-        # --- 3. Update Log Densities using Itô Estimator (Theorem 1) [cite: 177] ---
-        # This part is primarily for the 'OR' mode but can be run for both for consistency
-        # This implementation was also missing from the original code but is needed for 'OR'
-        f_t_coeff, _ = get_forward_process_params(t)
-        f_t = f_t_coeff * img
-        div_f = f_t_coeff * d
-
+        # Update log densities
         composed_drift = kappa[0] * reverse_drifts[0] + kappa[1] * reverse_drifts[1]
         dx = composed_drift * d_tau + g_t * dW_noise
 
         for idx in range(num_models):
-            # Using the simplified formula from Theorem 1 [cite: 185]
             term1 = torch.sum(dx * scores[idx])
             term2_inner = torch.sum((f_t - (g_t_sq / 2) * scores[idx]) * scores[idx])
             term2 = d_tau * (div_f + term2_inner)
             d_log_q = term1 + term2
-            log_qs[idx] += d_log_q.detach()  # Detach to prevent gradient buildup
+            log_qs[idx] += d_log_q.detach()
 
     return img
 
