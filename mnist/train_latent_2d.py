@@ -5,12 +5,13 @@ from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 from sklearn.decomposition import PCA
 import os
-from tqdm import trange
+from tqdm import tqdm
+import matplotlib.pyplot as plt
 from models.mlp_2d import MLP
-from .schedule import q_t as q_t_image, alpha, sigma
+from schedule import q_t as q_t_image, alpha, sigma
 from utils import set_seed, save_checkpoint
 from viz import plot_loss, scatter2d
-from .dataset import get_mnist_dataloader
+from dataset import get_mnist_dataloader
 
 # --- Configuration ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
