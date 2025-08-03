@@ -4,12 +4,10 @@ import numpy as np
 import os
 from tqdm import trange
 import matplotlib.pyplot as plt
-from sklearn.decomposition import PCA
-
 from models.mlp_2d import MLP
-from schedules import dlog_alphadt, beta, sigma, alpha
+from schedule import dlog_alphadt, beta, sigma, alpha
 from utils import load_checkpoint, set_seed
-from data import get_mnist_dataloader
+from dataset import get_mnist_dataloader
 
 
 # --- Helper for latent space diffusion ---
