@@ -8,12 +8,20 @@ import argparse
 
 # Assuming mlp_2d.py and other modules are in correct paths
 from models.mlp_2d import MLP
-from schedule import q_t
+from schedule import alpha, sigma
 from shapes.dataset import ShapesDataset
 from shapes.viz import plot_loss
 from utils import set_seed, save_checkpoint
 
-
+def q_t_latent(x0, t, eps=None):
+    """Forward diffusion for 2D latent vectors."""
+    if eps is None:
+        eps = torch.randn_like(x0)
+    # Reshape for broadcasting with (batch_size, 2) latent vectors
+    alpha_t = alpha(t).view(-1, 1)
+    sigma_t = sigma(t).view(-1, 1)
+    xt = alpha_t * x0 + sigma_t * eps
+    return xt, eps
 def main(args):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     set_seed(42)
@@ -59,7 +67,7 @@ def main(args):
             optimizer.zero_grad()
             x0_latent = x0_latent.to(DEVICE)
             t = torch.rand(x0_latent.shape[0], device=DEVICE) * (1.0 - 1e-3) + 1e-3
-            xt_latent, eps = q_t(x0_latent, t)
+            xt_latent, eps = q_t_latent(x0_latent, t)
             eps_hat = model(t, xt_latent)
             loss = ((eps - eps_hat) ** 2).mean()
             loss.backward()
