@@ -11,7 +11,7 @@ from models.mlp_2d import MLP
 from schedule import q_t as q_t_image, alpha, sigma
 from utils import set_seed, save_checkpoint
 from viz import plot_loss, scatter2d
-from dataset import get_mnist_dataloader
+from dataset import ShapesDataset
 
 # --- Configuration ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
