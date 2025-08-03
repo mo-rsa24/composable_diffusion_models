@@ -8,10 +8,18 @@ from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
 from models.mlp_2d import MLP
-from schedule import dlog_alphadt, beta, sigma, q_t
+from schedule import dlog_alphadt, beta, sigma, alpha
 from utils import load_checkpoint, set_seed
 from shapes.dataset import ShapesDataset
 
+def q_t_latent(x0, t, eps=None):
+    """Forward diffusion for 2D latent vectors."""
+    if eps is None:
+        eps = torch.randn_like(x0)
+    alpha_t = alpha(t).view(-1, 1)
+    sigma_t = sigma(t).view(-1, 1)
+    xt = alpha_t * x0 + sigma_t * eps
+    return xt, eps
 # --- Configuration ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 set_seed(42)
@@ -71,15 +79,34 @@ with torch.no_grad():
     x_gen_history[0.0] = x_gen_final.cpu().numpy()
 
 # --- 4. Plot the Latent Space Reverse Process ---
+# (MODIFIED) Dynamically calculate plot limits
+all_plot_points = []
+for t_val in x_gen_history.keys():
+    t_up = torch.full((x0_up.shape[0],), t_val, device=DEVICE)
+    xt_up, _ = q_t_latent(x0_up, t_up)
+    all_plot_points.append(xt_up.cpu().numpy())
+
+    t_down = torch.full((x0_down.shape[0],), t_val, device=DEVICE)
+    xt_down, _ = q_t_latent(x0_down, t_down)
+    all_plot_points.append(xt_down.cpu().numpy())
+
+    all_plot_points.append(x_gen_history[t_val])
+
+all_points_np = np.concatenate(all_plot_points, axis=0)
+min_val, max_val = all_points_np.min(), all_points_np.max()
+plot_limit = max(abs(min_val), abs(max_val)) * 1.1
+
 fig, axes = plt.subplots(1, 6, figsize=(24, 4), sharex=True, sharey=True)
 plot_times = sorted(x_gen_history.keys(), reverse=True)
 
 for i, t_val in enumerate(plot_times):
     ax = axes[i]
-    t = torch.full((x0_up.shape[0],), t_val, device=DEVICE)
-    xt_up, _ = q_t(x0_up, t)
-    t = torch.full((x0_down.shape[0],), t_val, device=DEVICE)
-    xt_down, _ = q_t(x0_down, t)
+    t_up = torch.full((x0_up.shape[0],), t_val, device=DEVICE)
+    xt_up, _ = q_t_latent(x0_up, t_up)
+
+    t_down = torch.full((x0_down.shape[0],), t_val, device=DEVICE)
+    xt_down, _ = q_t_latent(x0_down, t_down)
+
     xt_gen = x_gen_history[t_val]
 
     ax.scatter(xt_up.cpu()[:, 0], xt_up.cpu()[:, 1], alpha=0.3, label='Red Circles')
@@ -87,8 +114,8 @@ for i, t_val in enumerate(plot_times):
     ax.scatter(xt_gen[:, 0], xt_gen[:, 1], alpha=0.5, color='purple', label='Generated')
     ax.set_title(f"t={t_val:.2f}")
     ax.grid(True)
-    ax.set_xlim(-15, 15)
-    ax.set_ylim(-15, 15)
+    ax.set_xlim(-plot_limit, plot_limit)
+    ax.set_ylim(-plot_limit, plot_limit)
 
 axes[0].legend()
 fig.suptitle("Reverse Diffusion using Combined Latent Shape/Color Models", fontsize=16)
