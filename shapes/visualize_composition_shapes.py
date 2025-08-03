@@ -44,8 +44,8 @@ N_STEPS = 100
 W_SHAPE, W_COLOR = 1.0, 1.0
 
 # --- Paths ---
-OUTPUT_DIR = "outputs/composition_shapes"
-CHECKPOINT_DIR = "checkpoints"
+OUTPUT_DIR = "outputs_shapes/composition_shapes"
+CHECKPOINT_DIR = "checkpoints_shapes"
 SHAPE_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "shape_expert.pth")
 COLOR_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "color_expert.pth")
 PCA_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "pca_shapes.joblib")
