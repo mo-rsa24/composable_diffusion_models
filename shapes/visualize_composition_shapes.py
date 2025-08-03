@@ -8,24 +8,47 @@ from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 
 from models.mlp_2d import MLP
-from schedule import dlog_alphadt, beta, sigma, alpha
 from utils import load_checkpoint, set_seed
 from shapes.dataset import ShapesDataset
 
+# --- (NEW) Stable Noise Schedule & SDE Solver ---
+# This schedule is more numerically stable for latent space diffusion.
+beta_0, beta_1 = 0.1, 20.0
+
+
+def stable_log_alpha(t):
+    return -0.5 * t * beta_0 - 0.25 * t.pow(2) * (beta_1 - beta_0)
+
+
+def stable_alpha(t):
+    return torch.exp(stable_log_alpha(t))
+
+
+def stable_sigma(t):
+    return torch.sqrt(1 - stable_alpha(t) ** 2)
+
+
+def stable_dlog_alphadt(t):
+    return -0.5 * beta_0 - 0.5 * t * (beta_1 - beta_0)
+
+
+def stable_beta(t):
+    return -2 * stable_dlog_alphadt(t) * (stable_sigma(t) ** 2)
+
+
 def q_t_latent(x0, t, eps=None):
-    """Forward diffusion for 2D latent vectors."""
-    if eps is None:
-        eps = torch.randn_like(x0)
-    alpha_t = alpha(t).view(-1, 1)
-    sigma_t = sigma(t).view(-1, 1)
-    xt = alpha_t * x0 + sigma_t * eps
-    return xt, eps
+    if eps is None: eps = torch.randn_like(x0)
+    alpha_t = stable_alpha(t).view(-1, 1)
+    sigma_t = stable_sigma(t).view(-1, 1)
+    return alpha_t * x0 + sigma_t * eps, eps
+
+
 # --- Configuration ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 set_seed(42)
 N_SAMPLES = 512
 N_STEPS = 1000
-W_SHAPE, W_COLOR = 1.0, 1.0  # Composition weights
+W_SHAPE, W_COLOR = 1.0, 1.0
 
 # --- Paths ---
 OUTPUT_DIR = "outputs_shapes/composition_shapes"
@@ -49,9 +72,9 @@ all_images, all_shape_labels, all_color_labels = next(iter(full_dataloader))
 images_flat = all_images.view(all_images.size(0), -1).numpy()
 latent_codes = torch.from_numpy(pca.transform(images_flat)).float().to(DEVICE)
 
-# Define two groups for plotting (e.g., red circles vs green squares)
-x0_up = latent_codes[(all_shape_labels == 0) & (all_color_labels == 0)]  # Red Circles
-x0_down = latent_codes[(all_shape_labels == 1) & (all_color_labels == 1)]  # Green Squares
+# Define two groups for plotting (Circles vs Squares)
+x0_up = latent_codes[all_shape_labels == 0]  # Circles
+x0_down = latent_codes[all_shape_labels == 1]  # Squares
 
 # --- 3. Run Combined Reverse Diffusion ---
 x_gen_history = {}
@@ -68,30 +91,28 @@ with torch.no_grad():
 
         eps_hat_shape = shape_model(t, x)
         eps_hat_color = color_model(t, x)
-        eps_hat_combined = W_SHAPE * eps_hat_shape + W_COLOR * eps_hat_color
+        eps_hat_combined = (W_SHAPE * eps_hat_shape + W_COLOR * eps_hat_color) / (W_SHAPE + W_COLOR)
 
-        drift = dlog_alphadt(t).view(-1, 1) * x - beta(t).view(-1, 1) / sigma(t).view(-1, 1) * eps_hat_combined
-        diffusion = torch.sqrt(2 * beta(t)).view(-1, 1)
-        dx = -drift * dt + diffusion * torch.sqrt(torch.tensor(dt)) * torch.randn_like(x)
-        x = x + dx
+        # --- (MODIFIED) More Stable SDE Update Step ---
+        # This is the Euler-Maruyama step for the reverse SDE
+        sigma_t = stable_sigma(t).view(-1, 1)
+        alpha_t = stable_alpha(t).view(-1, 1)
+
+        # Estimate the score s(xt, t) = -eps_hat / sigma_t
+        score = -eps_hat_combined / sigma_t
+
+        # Reverse SDE update
+        drift = (stable_dlog_alphadt(t).view(-1, 1) * x) - 0.5 * stable_beta(t).view(-1, 1) * score
+        diffusion_term = torch.sqrt(stable_beta(t)).view(-1, 1) * torch.randn_like(x) * np.sqrt(dt)
+        x = x - drift * dt + diffusion_term
 
     x_gen_final = x
     x_gen_history[0.0] = x_gen_final.cpu().numpy()
 
 # --- 4. Plot the Latent Space Reverse Process ---
-# (MODIFIED) Dynamically calculate plot limits
-all_plot_points = []
-for t_val in x_gen_history.keys():
-    t_up = torch.full((x0_up.shape[0],), t_val, device=DEVICE)
-    xt_up, _ = q_t_latent(x0_up, t_up)
-    all_plot_points.append(xt_up.cpu().numpy())
-
-    t_down = torch.full((x0_down.shape[0],), t_val, device=DEVICE)
-    xt_down, _ = q_t_latent(x0_down, t_down)
-    all_plot_points.append(xt_down.cpu().numpy())
-
-    all_plot_points.append(x_gen_history[t_val])
-
+all_plot_points = [x_gen_history[t] for t in sorted(x_gen_history.keys())]
+all_plot_points.append(x0_up.cpu().numpy())
+all_plot_points.append(x0_down.cpu().numpy())
 all_points_np = np.concatenate(all_plot_points, axis=0)
 min_val, max_val = all_points_np.min(), all_points_np.max()
 plot_limit = max(abs(min_val), abs(max_val)) * 1.1
@@ -101,16 +122,14 @@ plot_times = sorted(x_gen_history.keys(), reverse=True)
 
 for i, t_val in enumerate(plot_times):
     ax = axes[i]
-    t_up = torch.full((x0_up.shape[0],), t_val, device=DEVICE)
-    xt_up, _ = q_t_latent(x0_up, t_up)
-
-    t_down = torch.full((x0_down.shape[0],), t_val, device=DEVICE)
-    xt_down, _ = q_t_latent(x0_down, t_down)
-
+    t = torch.full((x0_up.shape[0],), t_val, device=DEVICE)
+    xt_up, _ = q_t_latent(x0_up, t)
+    t = torch.full((x0_down.shape[0],), t_val, device=DEVICE)
+    xt_down, _ = q_t_latent(x0_down, t)
     xt_gen = x_gen_history[t_val]
 
-    ax.scatter(xt_up.cpu()[:, 0], xt_up.cpu()[:, 1], alpha=0.3, label='Red Circles')
-    ax.scatter(xt_down.cpu()[:, 0], xt_down.cpu()[:, 1], alpha=0.3, label='Green Squares')
+    ax.scatter(xt_up.cpu()[:, 0], xt_up.cpu()[:, 1], alpha=0.3, label='Circles (GT)')
+    ax.scatter(xt_down.cpu()[:, 0], xt_down.cpu()[:, 1], alpha=0.3, label='Squares (GT)')
     ax.scatter(xt_gen[:, 0], xt_gen[:, 1], alpha=0.5, color='purple', label='Generated')
     ax.set_title(f"t={t_val:.2f}")
     ax.grid(True)
