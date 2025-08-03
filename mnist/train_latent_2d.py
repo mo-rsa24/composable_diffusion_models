@@ -36,30 +36,28 @@ def main(args):
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-    # --- 1. PCA Fitting and Data Transformation ---
-    print("Fitting PCA and transforming data...")
-    # Use the 'classes' argument to filter the dataset for PCA
-    full_dataloader = get_mnist_dataloader(batch_size=60000, shuffle=False, classes=args.classes)
-    all_images, all_labels = next(iter(full_dataloader))
-    images_flat = all_images.view(all_images.size(0), -1).numpy()
+    # --- 1. LOAD Universal PCA and Transform Data ---
+    print(f"Loading Universal PCA and transforming data for classes: {args.classes}...")
+    PCA_PATH_MEAN = os.path.join(CHECKPOINT_DIR, "pca_mean.npy")
+    PCA_PATH_COMPONENTS = os.path.join(CHECKPOINT_DIR, "pca_components.npy")
+    pca_mean = np.load(PCA_PATH_MEAN)
+    pca_components = np.load(PCA_PATH_COMPONENTS)
 
-    pca = PCA(n_components=N_COMPONENTS)
-    latent_codes = pca.fit_transform(images_flat)
+    dataloader = get_mnist_dataloader(batch_size=60000, shuffle=False, classes=args.classes)
+    images, labels = next(iter(dataloader))
+    images_flat = images.view(images.size(0), -1).numpy()
 
-    # Save PCA components. Note: It's better to save these once for all digits.
-    # We will overwrite them here, but for a full project, you might handle this differently.
-    np.save(os.path.join(CHECKPOINT_DIR, "pca_mean.npy"), pca.mean_)
-    np.save(os.path.join(CHECKPOINT_DIR, "pca_components.npy"), pca.components_)
-    print(f"PCA mean and components saved to {CHECKPOINT_DIR}/")
+    # Transform data using the loaded universal PCA model
+    latent_codes = np.dot(images_flat - pca_mean, pca_components.T)
 
-    # --- Visualize Original Latent Space with Labeled Legend ---
-    plot_suffix = f"_{'_'.join(map(str, args.classes))}" if args.classes else "_all"
+    # --- Visualize the transformed latent space ---
+    plot_suffix = f"_{'_'.join(map(str, args.classes))}"
     scatter_path = os.path.join(OUTPUT_DIR, f"latent_space_ground_truth{plot_suffix}.png")
     scatter2d_labeled(
         latent_codes,
-        labels=all_labels.numpy(),
+        labels=labels.numpy(),
         path=scatter_path,
-        title=f"MNIST Latent Space (Classes: {args.classes})"
+        title=f"Latent Space (Classes: {args.classes})"
     )
     print(f"Labeled scatter plot saved to {scatter_path}")
 
