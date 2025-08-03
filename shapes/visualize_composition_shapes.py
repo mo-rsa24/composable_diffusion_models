@@ -7,12 +7,13 @@ import matplotlib.pyplot as plt
 import joblib
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
+from functools import partial
 
 from models.mlp_2d import MLP
 from utils import load_checkpoint, set_seed
 from shapes.dataset import ShapesDataset
 
-# --- Stable Noise Schedule ---
+# --- Stable Noise Schedule & SDE Solver ---
 beta_0, beta_1 = 0.1, 20.0
 
 
@@ -28,6 +29,14 @@ def stable_sigma(t):
     return torch.sqrt(1 - stable_alpha(t) ** 2)
 
 
+def stable_dlog_alphadt(t):
+    return -0.5 * beta_0 - 0.5 * t * (beta_1 - beta_0)
+
+
+def stable_beta(t):
+    return -2 * stable_dlog_alphadt(t) * (stable_sigma(t) ** 2)
+
+
 def q_t_latent(x0, t, eps=None):
     if eps is None: eps = torch.randn_like(x0)
     alpha_t = stable_alpha(t).view(-1, 1)
@@ -35,12 +44,55 @@ def q_t_latent(x0, t, eps=None):
     return alpha_t * x0 + sigma_t * eps, eps
 
 
+# --- (NEW) Functions from the Itô Paper for Latent Space ---
+def vector_field(model, t, x):
+    """
+    Computes the model output (eps_hat) and its divergence for a 2D MLP.
+    """
+    x_clone = x.clone().requires_grad_(True)
+    t_in = torch.full((x.shape[0],), t, device=x.device)
+
+    # The model is unconditional, so we don't need partial
+    model_fn = lambda _x: model(t_in, _x)
+
+    eps_hat = model_fn(x_clone)
+
+    # Use Hutchinson's estimator for divergence
+    eps_hutch = torch.randn_like(x_clone)
+    jvp_val = torch.autograd.grad(eps_hat, x_clone, grad_outputs=eps_hutch, create_graph=False)[0]
+    divergence = (jvp_val * eps_hutch).sum(dim=1)
+
+    return eps_hat.detach(), divergence.detach()
+
+
+def get_kappa(t, divlogs, eps_hats, device):
+    """Calculates the weighting factor kappa for 2D latent space."""
+    divlog_1, divlog_2 = divlogs
+    eps_hat_1, eps_hat_2 = eps_hats
+
+    sigma_t = stable_sigma(t).to(device)
+
+    # Note: The score s = -eps_hat / sigma_t.
+    # The paper's kappa is in terms of the score 's', so we convert.
+    s1 = -eps_hat_1 / sigma_t.view(-1, 1)
+    s2 = -eps_hat_2 / sigma_t.view(-1, 1)
+
+    # The divergence of the score is -div(eps_hat)/sigma
+    div_s1 = -divlog_1 / sigma_t
+    div_s2 = -divlog_2 / sigma_t
+
+    kappa_num = div_s1 - div_s2 + (s1 * (s1 - s2)).sum(dim=1)
+    kappa_den = ((s1 - s2) ** 2).sum(dim=1)
+
+    kappa = kappa_num / (kappa_den + 1e-9)
+    return kappa.view(-1, 1)
+
+
 # --- Configuration ---
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 set_seed(42)
 N_SAMPLES = 512
-# (MODIFIED) Using fewer steps is fine with a good sampler like DDIM
-N_STEPS = 100
+N_STEPS = 1000
 W_SHAPE, W_COLOR = 1.0, 1.0
 
 # --- Paths ---
@@ -68,44 +120,37 @@ latent_codes = torch.from_numpy(pca.transform(images_flat)).float().to(DEVICE)
 x0_up = latent_codes[all_shape_labels == 0]  # Circles
 x0_down = latent_codes[all_shape_labels == 1]  # Squares
 
-# --- 3. Run Combined Reverse Diffusion with DDIM Sampler ---
+# --- 3. Run Combined Reverse Diffusion with Itô SDE Solver ---
 x_gen_history = {}
 with torch.no_grad():
     x = torch.randn(N_SAMPLES, 2, device=DEVICE)
+    dt = 1.0 / N_STEPS
 
-    # Define the time steps for DDIM
-    time_steps = torch.linspace(1.0, 1e-3, N_STEPS + 1, device=DEVICE)
+    for i in trange(N_STEPS, desc="Generating with Itô SDE"):
+        t_val = 1.0 - i * dt
+        t = torch.full((N_SAMPLES,), t_val, device=DEVICE)
 
-    for i in trange(N_STEPS, desc="Generating with DDIM Sampler"):
-        t_now = time_steps[i]
-        t_next = time_steps[i + 1]
+        if any(np.isclose(t_val, ts, atol=1e-3) for ts in [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]):
+            x_gen_history[round(t_val, 2)] = x.cpu().numpy()
 
-        t_tensor = torch.full((N_SAMPLES,), t_now, device=DEVICE)
+        # --- Itô Composition Step ---
+        eps_hat_shape, div_shape = vector_field(shape_model, t_val, x)
+        eps_hat_color, div_color = vector_field(color_model, t_val, x)
 
-        # Store history at specific timesteps for plotting
-        if any(np.isclose(t_now.cpu(), ts, atol=0.01) for ts in [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]):
-            x_gen_history[round(t_now.cpu().item(), 2)] = x.cpu().numpy()
+        kappa = get_kappa(t, (div_shape, div_color), (eps_hat_shape, eps_hat_color), DEVICE)
 
-        # Get combined noise prediction
-        eps_hat_shape = shape_model(t_tensor, x)
-        eps_hat_color = color_model(t_tensor, x)
-        eps_hat_combined = (W_SHAPE * eps_hat_shape + W_COLOR * eps_hat_color) / (W_SHAPE + W_COLOR)
+        # We use the score s = -eps_hat / sigma_t
+        sigma_t = stable_sigma(t).view(-1, 1)
+        s_shape = -eps_hat_shape / sigma_t
+        s_color = -eps_hat_color / sigma_t
 
-        # --- (MODIFIED) DDIM Update Step ---
-        alpha_t_now = stable_alpha(t_tensor).view(-1, 1)
-        sigma_t_now = stable_sigma(t_tensor).view(-1, 1)
+        # Combined score using kappa
+        s_combined = s_color + kappa * (s_shape - s_color)
 
-        # Predict x0 based on the current xt and predicted noise
-        x0_pred = (x - sigma_t_now * eps_hat_combined) / alpha_t_now
-        x0_pred.clamp_(-15, 15)  # Clamp to prevent outliers, based on forward plot scale
-
-        # Get schedule for the next step
-        alpha_t_next = stable_alpha(t_next).view(-1, 1)
-        sigma_t_next = stable_sigma(t_next).view(-1, 1)
-
-        # Use the DDIM formula to deterministically step to the next xt
-        # The "direction" pointing to x0 is given by eps_hat_combined
-        x = alpha_t_next * x0_pred + sigma_t_next * eps_hat_combined
+        # --- SDE Update Step ---
+        drift = stable_dlog_alphadt(t).view(-1, 1) * x - 0.5 * stable_beta(t).view(-1, 1) * s_combined
+        diffusion_term = torch.sqrt(stable_beta(t)).view(-1, 1) * torch.randn_like(x) * np.sqrt(dt)
+        x = x - drift * dt + diffusion_term
 
     x_gen_final = x
     x_gen_history[0.0] = x_gen_final.cpu().numpy()
@@ -138,17 +183,18 @@ for i, t_val in enumerate(plot_times):
     ax.set_ylim(-plot_limit, plot_limit)
 
 axes[0].legend()
-fig.suptitle("Reverse Diffusion using Combined Latent Shape/Color Models", fontsize=16)
+fig.suptitle("Reverse Diffusion using Combined Latent Shape/Color Models (Itô Method)", fontsize=16)
 plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-plt.savefig(os.path.join(OUTPUT_DIR, "latent_composition_process_shapes.png"))
+plt.savefig(os.path.join(OUTPUT_DIR, "latent_composition_process_shapes_ito.png"))
 plt.close()
-print(f"Latent visualization saved to {os.path.join(OUTPUT_DIR, 'latent_composition_process_shapes.png')}")
+print(f"Latent visualization saved to {os.path.join(OUTPUT_DIR, 'latent_composition_process_shapes_ito.png')}")
 
 # --- 5. Decode Final Latent Points back to Images ---
 print("Decoding final latent points back to images...")
 img_flat = pca.inverse_transform(x_gen_final.cpu().numpy())
 img_reconstructed = torch.from_numpy(img_flat).view(-1, 3, 64, 64)
 
-save_image(img_reconstructed.clamp(-1, 1), os.path.join(OUTPUT_DIR, "reconstructed_shapes.png"), nrow=16,
+save_image(img_reconstructed.clamp(-1, 1), os.path.join(OUTPUT_DIR, "reconstructed_shapes_ito.png"), nrow=16,
            normalize=True, value_range=(-1, 1))
-print(f"Reconstructed images saved to {os.path.join(OUTPUT_DIR, 'reconstructed_shapes.png')}")
+print(f"Reconstructed images saved to {os.path.join(OUTPUT_DIR, 'reconstructed_shapes_ito.png')}")
+
