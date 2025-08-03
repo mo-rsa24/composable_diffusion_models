@@ -1,33 +1,31 @@
-# dataset.py (Modified for Shape/Color Composition)
+# shapes/dataset.py
 import torch
 from torch.utils.data import Dataset
-from torchvision.transforms import Compose, ToTensor, Lambda, Grayscale
-from torchvision.transforms import functional as F
-from PIL import Image, ImageDraw, ImageFilter
+from torchvision.transforms import Compose, ToTensor, Lambda, Grayscale, GaussianBlur
+from PIL import Image, ImageDraw
 
 
 class ShapesDataset(Dataset):
-    """Generates images of simple shapes with specified colors on the fly."""
+    """
+    Generates images of simple shapes with specified colors on the fly.
+    This dataset ALWAYS returns the image, shape label, and color label.
+    """
 
-    def __init__(self, size=5000, img_size=64, mode='rgb'):
+    def __init__(self, size=5000, img_size=64):
         self.size = size
         self.img_size = img_size
-        self.mode = mode  # 'rgb', 'shape', or 'color'
 
         self.shapes = ["circle", "square", "triangle"]
         self.colors = ["red", "green", "blue"]
 
+        self.shape_to_idx = {s: i for i, s in enumerate(self.shapes)}
+        self.color_to_idx = {c: i for i, c in enumerate(self.colors)}
+
         self.all_combinations = [(s, c) for s in self.shapes for c in self.colors]
 
-        self.transform_rgb = Compose([
+        self.base_transform = Compose([
             ToTensor(),
             Lambda(lambda t: (t * 2) - 1)  # Scale to [-1, 1]
-        ])
-
-        self.transform_shape = Compose([
-            Grayscale(num_output_channels=1),
-            ToTensor(),
-            Lambda(lambda t: (t * 2) - 1)
         ])
 
     def __len__(self):
@@ -48,22 +46,11 @@ class ShapesDataset(Dataset):
 
     def __getitem__(self, idx):
         shape_name, color_name = self.all_combinations[idx % len(self.all_combinations)]
-
-        # Create the base RGB image
+        shape_label = torch.tensor(self.shape_to_idx[shape_name])
+        color_label = torch.tensor(self.color_to_idx[color_name])
         image = Image.new("RGB", (self.img_size, self.img_size), "black")
         draw = ImageDraw.Draw(image)
         self._draw_shape(shape_name, color_name, draw)
 
-        if self.mode == 'shape':
-            # Return grayscale version for shape-only training
-            return self.transform_shape(image)
-
-        elif self.mode == 'color':
-            # For color training, we destroy shape info by blurring heavily
-            # This creates a "color blob"
-            blob_image = image.filter(ImageFilter.GaussianBlur(radius=self.img_size / 4))
-            return self.transform_rgb(blob_image)
-
-        else:  # self.mode == 'rgb'
-            # Return the original colored shape
-            return self.transform_rgb(image)
+        image_tensor = self.base_transform(image)
+        return image_tensor, shape_label, color_label

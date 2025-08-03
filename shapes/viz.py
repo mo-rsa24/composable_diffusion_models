@@ -10,6 +10,14 @@ def save_grid(tensor, path, nrow=8):
     tensor = (tensor + 1) / 2.0  # De-normalize from [-1, 1] to [0, 1]
     save_image(tensor, path, nrow=nrow)
 
+def save_grid_(tensor, path, in_channels: int = 3):
+    # If grayscale, add a channel dimension for save_image
+    if in_channels == 1:
+        tensor = tensor.repeat(1, 3, 1, 1)
+    # Normalize to [0, 1] for saving
+    save_image(tensor.clamp(-1, 1), path, normalize=True, value_range=(-1, 1))
+    print(f"Validation grid saved to {path}")
+
 def save_gif(frames, path, duration=150):
     """Saves a list of image tensors as a GIF."""
     imgs = [((frame.cpu().permute(1, 2, 0) + 1) / 2.0 * 255).clamp(0, 255).to(torch.uint8).numpy() for frame in frames]
