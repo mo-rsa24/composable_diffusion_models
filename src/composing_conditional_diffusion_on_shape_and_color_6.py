@@ -334,6 +334,7 @@ def sample_superdiff(model1, model2, label1_idx, label2_idx, mode='OR', T=1.0, l
     """
     print(f"Sampling with SUPERDIFF ({mode}) on two models.")
 
+
     img_size = Config.IMG_SIZE
     img = torch.randn((1, 3, img_size, img_size), device=Config.DEVICE)
     d = 3 * img_size * img_size

@@ -13,6 +13,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 
+from src.utils.tools import tiny_subset
+
 
 # --- Configuration ---
 class Config:
@@ -20,11 +22,14 @@ class Config:
     Configuration class for all hyperparameters and settings.
     """
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    SANITY = True
+    SANITY_NUM_EXAMPLES = 8
     EXP_NAME = "superdiff_composition"
     IMG_SIZE = 64
-    BATCH_SIZE = 128
+    BATCH_SIZE = 4 if SANITY else 128
     TIMESTEPS = 500
-    NUM_EPOCHS = 200  # Increase for better results, 200 is a good start
+    NUM_EPOCHS =  1 if SANITY else 200
+    LOG_EVERY_EPOCH = 1 if SANITY else 20
     LR = 2e-4
     SHAPES = ["circle", "square", "triangle"]
     COLORS = ["red", "green", "blue"]
@@ -273,7 +278,7 @@ class UNet(nn.Module):
 
 # --- 4. Training Function (Identical to previous version) ---
 
-def train_model(model, dataloader, diffusion,  optimizer, num_epochs, cond_type, config):
+def train_model(model, dataloader, diffusion,  optimizer, num_epochs, cond_type, config: Config):
     print(f"\n--- Training {cond_type.upper()} model ---")
     best_loss = float('inf')
     model_path = os.path.join(config.OUTPUT_DIR, f"best_{cond_type}_model.pth")
@@ -290,7 +295,7 @@ def train_model(model, dataloader, diffusion,  optimizer, num_epochs, cond_type,
             optimizer.step()
             total_loss += loss.item()
             progress_bar.set_postfix(loss=loss.item())
-        if epoch % 50 == 0:
+        if epoch % config.LOG_EVERY_EPOCH == 0:
             model.eval()
             generated_image = sample_image(model, diffusion, labels)
             samples_dir: Path = Path(Config.OUTPUT_DIR) / cond_type / f"epoch_{epoch}"
@@ -516,6 +521,9 @@ if __name__ == '__main__':
         device=config.DEVICE
     )
     train_dataset = ShapesDataset(config, is_train=True)
+    if Config.SANITY:
+        dataset = tiny_subset(train_dataset, Config.SANITY_NUM_EXAMPLES)
+
     train_dataloader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True)
 
     # --- Train Models ---
