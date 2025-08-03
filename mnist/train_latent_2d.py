@@ -96,7 +96,7 @@ if __name__ == '__main__':
     parser.add_argument('--model_path', type=str, required=True,
                         help='Path to save the trained model checkpoint.')
 
-    parser.add_argument('--epochs', type=int, default=100, help='Number of training epochs.')
+    parser.add_argument('--epochs', type=int, default=300, help='Number of training epochs.')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate.')
     parser.add_argument('--batch_size', type=int, default=512, help='Batch size.')
     parser.add_argument('--seed', type=int, default=42, help='Random seed.')

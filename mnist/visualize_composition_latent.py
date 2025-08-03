@@ -1,4 +1,4 @@
-# visualize_composition_latent.py
+# visualize_composition_shapes.py
 import torch
 import numpy as np
 import os

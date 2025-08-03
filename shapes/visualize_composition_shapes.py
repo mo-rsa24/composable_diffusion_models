@@ -1,4 +1,3 @@
-# visualize_composition_latent.py
 import torch
 import numpy as np
 import os
