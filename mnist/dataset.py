@@ -2,8 +2,10 @@ from torchvision import datasets, transforms
 from torch.utils.data import DataLoader, Subset
 import numpy as np
 
+from src.utils.tools import tiny_subset
 
-def get_mnist_dataloader(batch_size=128, shuffle=True, classes=None):
+
+def get_mnist_dataloader(batch_size=128, shuffle=True, classes=None, sanity:bool=False, sanity_num_examples: int = 8):
     """
     Returns a DataLoader for the MNIST dataset.
     Args:
@@ -20,9 +22,10 @@ def get_mnist_dataloader(batch_size=128, shuffle=True, classes=None):
     if classes is not None:
         idx = np.zeros_like(dataset.targets, dtype=bool)
         for target_class in classes:
-            idx = idx | (dataset.targets == target_class)
+            idx = idx | (dataset.targets.numpy() == target_class)
         dataset = Subset(dataset, np.where(idx)[0])
-
+    if sanity:
+        dataset = tiny_subset(dataset, sanity_num_examples)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=4, pin_memory=True)
     return dataloader
 

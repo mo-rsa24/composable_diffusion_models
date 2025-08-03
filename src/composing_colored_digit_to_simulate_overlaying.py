@@ -279,8 +279,8 @@ if __name__ == '__main__':
                         help="Name of the project directory.")
     parser.add_argument("--skip_train", action='store_true',
                         help="Skip training and load models directly from checkpoints.")
+
     parser.add_argument("--sanity", action='store_true',
                         help="Run sanity checks to ensure that the model is running")
-
     args = parser.parse_args()
     main(args)
