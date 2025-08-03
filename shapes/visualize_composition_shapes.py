@@ -1,3 +1,4 @@
+# visualize_composition_shapes.py
 import torch
 import numpy as np
 import os
@@ -11,8 +12,7 @@ from models.mlp_2d import MLP
 from utils import load_checkpoint, set_seed
 from shapes.dataset import ShapesDataset
 
-# --- (NEW) Stable Noise Schedule & SDE Solver ---
-# This schedule is more numerically stable for latent space diffusion.
+# --- Stable Noise Schedule ---
 beta_0, beta_1 = 0.1, 20.0
 
 
@@ -28,14 +28,6 @@ def stable_sigma(t):
     return torch.sqrt(1 - stable_alpha(t) ** 2)
 
 
-def stable_dlog_alphadt(t):
-    return -0.5 * beta_0 - 0.5 * t * (beta_1 - beta_0)
-
-
-def stable_beta(t):
-    return -2 * stable_dlog_alphadt(t) * (stable_sigma(t) ** 2)
-
-
 def q_t_latent(x0, t, eps=None):
     if eps is None: eps = torch.randn_like(x0)
     alpha_t = stable_alpha(t).view(-1, 1)
@@ -47,12 +39,13 @@ def q_t_latent(x0, t, eps=None):
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 set_seed(42)
 N_SAMPLES = 512
-N_STEPS = 1000
+# (MODIFIED) Using fewer steps is fine with a good sampler like DDIM
+N_STEPS = 100
 W_SHAPE, W_COLOR = 1.0, 1.0
 
 # --- Paths ---
-OUTPUT_DIR = "outputs_shapes/composition_shapes"
-CHECKPOINT_DIR = "checkpoints_shapes"
+OUTPUT_DIR = "outputs/composition_shapes"
+CHECKPOINT_DIR = "checkpoints"
 SHAPE_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "shape_expert.pth")
 COLOR_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "color_expert.pth")
 PCA_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "pca_shapes.joblib")
@@ -72,39 +65,47 @@ all_images, all_shape_labels, all_color_labels = next(iter(full_dataloader))
 images_flat = all_images.view(all_images.size(0), -1).numpy()
 latent_codes = torch.from_numpy(pca.transform(images_flat)).float().to(DEVICE)
 
-# Define two groups for plotting (Circles vs Squares)
 x0_up = latent_codes[all_shape_labels == 0]  # Circles
 x0_down = latent_codes[all_shape_labels == 1]  # Squares
 
-# --- 3. Run Combined Reverse Diffusion ---
+# --- 3. Run Combined Reverse Diffusion with DDIM Sampler ---
 x_gen_history = {}
 with torch.no_grad():
     x = torch.randn(N_SAMPLES, 2, device=DEVICE)
-    dt = 1.0 / N_STEPS
 
-    for i in trange(N_STEPS, desc="Generating with Combined Latent Models"):
-        t_val = 1.0 - i * dt
-        t = torch.full((N_SAMPLES,), t_val, device=DEVICE)
+    # Define the time steps for DDIM
+    time_steps = torch.linspace(1.0, 1e-3, N_STEPS + 1, device=DEVICE)
 
-        if any(np.isclose(t_val, ts, atol=1e-3) for ts in [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]):
-            x_gen_history[round(t_val, 2)] = x.cpu().numpy()
+    for i in trange(N_STEPS, desc="Generating with DDIM Sampler"):
+        t_now = time_steps[i]
+        t_next = time_steps[i + 1]
 
-        eps_hat_shape = shape_model(t, x)
-        eps_hat_color = color_model(t, x)
+        t_tensor = torch.full((N_SAMPLES,), t_now, device=DEVICE)
+
+        # Store history at specific timesteps for plotting
+        if any(np.isclose(t_now.cpu(), ts, atol=0.01) for ts in [1.0, 0.8, 0.6, 0.4, 0.2, 0.0]):
+            x_gen_history[round(t_now.cpu().item(), 2)] = x.cpu().numpy()
+
+        # Get combined noise prediction
+        eps_hat_shape = shape_model(t_tensor, x)
+        eps_hat_color = color_model(t_tensor, x)
         eps_hat_combined = (W_SHAPE * eps_hat_shape + W_COLOR * eps_hat_color) / (W_SHAPE + W_COLOR)
 
-        # --- (MODIFIED) More Stable SDE Update Step ---
-        # This is the Euler-Maruyama step for the reverse SDE
-        sigma_t = stable_sigma(t).view(-1, 1)
-        alpha_t = stable_alpha(t).view(-1, 1)
+        # --- (MODIFIED) DDIM Update Step ---
+        alpha_t_now = stable_alpha(t_tensor).view(-1, 1)
+        sigma_t_now = stable_sigma(t_tensor).view(-1, 1)
 
-        # Estimate the score s(xt, t) = -eps_hat / sigma_t
-        score = -eps_hat_combined / sigma_t
+        # Predict x0 based on the current xt and predicted noise
+        x0_pred = (x - sigma_t_now * eps_hat_combined) / alpha_t_now
+        x0_pred.clamp_(-15, 15)  # Clamp to prevent outliers, based on forward plot scale
 
-        # Reverse SDE update
-        drift = (stable_dlog_alphadt(t).view(-1, 1) * x) - 0.5 * stable_beta(t).view(-1, 1) * score
-        diffusion_term = torch.sqrt(stable_beta(t)).view(-1, 1) * torch.randn_like(x) * np.sqrt(dt)
-        x = x - drift * dt + diffusion_term
+        # Get schedule for the next step
+        alpha_t_next = stable_alpha(t_next).view(-1, 1)
+        sigma_t_next = stable_sigma(t_next).view(-1, 1)
+
+        # Use the DDIM formula to deterministically step to the next xt
+        # The "direction" pointing to x0 is given by eps_hat_combined
+        x = alpha_t_next * x0_pred + sigma_t_next * eps_hat_combined
 
     x_gen_final = x
     x_gen_history[0.0] = x_gen_final.cpu().numpy()
