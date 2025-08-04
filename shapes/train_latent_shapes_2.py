@@ -8,7 +8,8 @@ import argparse
 
 # Assuming mlp_2d.py and other modules are in correct paths
 from models.mlp_2d import MLP
-from schedule_2 import alpha, sigma
+# from schedule_2 import alpha, sigma
+from schedule_jax_faithful import alpha, sigma
 from shapes.dataset_ import ShapesDataset
 from shapes.viz import plot_loss
 from utils import set_seed, save_checkpoint
@@ -22,6 +23,7 @@ def q_t_latent(x0, t, eps=None):
     sigma_t = sigma(t).view(-1, 1)
     xt = alpha_t * x0 + sigma_t * eps
     return xt, eps
+
 def main(args):
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     set_seed(42)

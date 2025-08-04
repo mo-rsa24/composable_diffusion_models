@@ -15,7 +15,8 @@ from shapes.dataset_ import ShapesDataset
 # --- [FIXED] Use the single, authoritative schedule from training ---
 # This ensures the inference dynamics match the training process.
 # We import g2, the correct diffusion coefficient for the ODE solver.
-from schedule_2 import alpha, sigma, dlog_alphadt, g2
+# from schedule_2 import alpha, sigma, dlog_alphadt, g2
+from schedule_jax_faithful import alpha, sigma, dlog_alphadt, g2
 
 
 def q_t_latent(x0, t, eps=None):
