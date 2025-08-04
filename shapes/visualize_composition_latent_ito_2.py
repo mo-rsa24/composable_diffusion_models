@@ -122,14 +122,13 @@ x_gen_final = x
 x_gen_history[0.0] = x_gen_final.cpu().numpy()
 
 # --- 4. Plot the Latent Space Reverse Process ---
-# (Plotting code remains the same)
+# (Plotting code remains the same logic, but with a bug fix for tensor sizes)
 print("Plotting the latent space reverse process...")
 fig, axes = plt.subplots(1, 6, figsize=(24, 4), sharex=True, sharey=True)
 plot_times = sorted(x_gen_history.keys(), reverse=True)
+
 # Determine plot limits dynamically
-all_points_for_limit = []
-if x0_up is not None: all_points_for_limit.append(x0_up.cpu().numpy())
-if x0_down is not None: all_points_for_limit.append(x0_down.cpu().numpy())
+all_points_for_limit = [x0_up.cpu().numpy(), x0_down.cpu().numpy()]
 for t_val in plot_times:
     all_points_for_limit.append(x_gen_history[t_val])
 all_points_np = np.concatenate(all_points_for_limit, axis=0)
@@ -138,10 +137,14 @@ plot_limit = max(abs(min_val), abs(max_val)) * 1.1
 
 for i, t_val in enumerate(plot_times):
     ax = axes[i]
-    t_tensor = torch.full((x0_up.shape[0],), t_val, device=DEVICE)
-    xt_up, _ = q_t_latent(x0_up, t_tensor)
-    xt_down, _ = q_t_latent(x0_down, t_tensor)
     xt_gen = x_gen_history[t_val]
+
+    # [FIXED] Create a correctly-sized time tensor for each dataset
+    t_tensor_up = torch.full((x0_up.shape[0],), t_val, device=DEVICE)
+    xt_up, _ = q_t_latent(x0_up, t_tensor_up)
+
+    t_tensor_down = torch.full((x0_down.shape[0],), t_val, device=DEVICE)
+    xt_down, _ = q_t_latent(x0_down, t_tensor_down)
 
     ax.scatter(xt_up.cpu()[:, 0], xt_up.cpu()[:, 1], alpha=0.3, label='Data "Up" (Circles)')
     ax.scatter(xt_down.cpu()[:, 0], xt_down.cpu()[:, 1], alpha=0.3, label='Data "Down" (Squares)')
