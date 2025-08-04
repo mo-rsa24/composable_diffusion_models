@@ -38,6 +38,13 @@ def dlog_alphadt(t):
     t = torch.as_tensor(t, dtype=torch.float32)
     return -0.5 * beta_0 - 0.5 * t * (beta_1 - beta_0)
 
+def beta(t):
+    """
+    Custom beta(t) term from the JAX notebook. This is used in the
+    notebook's specific reverse ODE solver.
+    """
+    t = torch.as_tensor(t, dtype=torch.float32)
+    return 1 + 0.5 * t * beta_0 + 0.5 * t.pow(2) * (beta_1 - beta_0)
 
 # --- [FIXED] JAX-Faithful g2(t) ---
 # The reverse ODE depends on both alpha and sigma. Since we changed sigma,
