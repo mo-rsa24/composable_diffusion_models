@@ -12,7 +12,7 @@ print("--- Fitting PCA Model on Shapes Dataset ---")
 
 # --- Configuration ---
 N_COMPONENTS = 2
-CHECKPOINT_DIR = "checkpoints_shapes"
+CHECKPOINT_DIR = "checkpoints_shapes_2"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 PCA_MODEL_PATH = os.path.join(CHECKPOINT_DIR, "pca_shapes.joblib")
 
