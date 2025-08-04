@@ -97,7 +97,7 @@ def main(args):
     sanity_num_examples =  8
 
     model_dir = Path(os.path.dirname(args.model_path))
-    output_dir = Path("output_shapes")
+    output_dir = Path("final_output_shapes")
     model_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
