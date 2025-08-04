@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 import joblib
 
 # Assuming the new shapes/dataset.py is in the correct path
-from shapes.dataset import ShapesDataset
+from shapes.dataset_ import ShapesDataset
 
 print("--- Fitting PCA Model on Shapes Dataset ---")
 

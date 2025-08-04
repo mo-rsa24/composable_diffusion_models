@@ -9,7 +9,7 @@ import argparse
 # Assuming mlp_2d.py and other modules are in correct paths
 from models.mlp_2d import MLP
 from schedule import alpha, sigma
-from shapes.dataset import ShapesDataset
+from shapes.dataset_ import ShapesDataset
 from shapes.viz import plot_loss
 from utils import set_seed, save_checkpoint
 
