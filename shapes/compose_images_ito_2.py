@@ -1,38 +1,19 @@
+# compose_images_ito.py
 import torch
 import os
 import argparse
 from tqdm import trange
 from torchvision.utils import save_image
 from torchvision.transforms import Grayscale
-from functools import partial
 
-# Assuming these modules are in the correct paths
+# --- [REVISED] Updated imports from the corrected schedule file ---
+# We now import g2, the correct diffusion coefficient for the ODE solver,
+# instead of the incorrect beta function.
+from schedule_2 import sigma, dlog_alphadt, g2
+
 from models.unet_small import UNet
-from shapes.schedule import sigma, dlog_alphadt, beta
 from utils import load_checkpoint, set_seed
 
-# --- Stable Noise Schedule & SDE Solver (from superposition_edu_pytorch.py) ---
-beta_0, beta_1 = 0.1, 20.0
-
-
-def stable_log_alpha(t):
-    return -0.5 * t * beta_0 - 0.25 * t.pow(2) * (beta_1 - beta_0)
-
-
-def stable_alpha(t):
-    return torch.exp(stable_log_alpha(t))
-
-
-def stable_sigma(t):
-    return torch.sqrt(1 - stable_alpha(t) ** 2)
-
-
-def stable_dlog_alphadt(t):
-    return -0.5 * beta_0 - 0.5 * t * (beta_1 - beta_0)
-
-
-def stable_beta(t):
-    return -2 * stable_dlog_alphadt(t) * (stable_sigma(t) ** 2)
 
 # --- Configuration ---
 class Config:
@@ -41,33 +22,62 @@ class Config:
     COLORS = ["red", "green", "blue"]
 
 
-# --- Functions from the Itô Paper Implementation ---
+# --- [REVISED] Corrected Divergence Calculation ---
 
 def vector_field(model, t, x, y):
     """
-    Computes the model output (eps_hat) and its divergence for conditional U-Nets.
+    Computes the model output (eps_hat) and its divergence.
+    This version is for models where input and output channels match (e.g., the color model).
     """
     x_clone = x.clone().requires_grad_(True)
     t_in = torch.full((x.shape[0],), t, device=x.device, dtype=torch.float32)
 
-    model_fn = partial(model, t=t_in, y=y)
+    eps_hat = model(x_clone, t_in, y)
 
-    eps_hat = model_fn(x_clone)
-
+    # Use Hutchinson's estimator for the divergence
     eps_hutch = torch.randn_like(x_clone)
-    # torch.autograd.grad requires a computation graph
+    # The `create_graph=False` is a performance optimization as we don't need gradients of the divergence.
     jvp_val = torch.autograd.grad(eps_hat, x_clone, grad_outputs=eps_hutch, create_graph=False)[0]
-
     divergence = (jvp_val * eps_hutch).sum(dim=(1, 2, 3))
 
     return eps_hat.detach(), divergence.detach()
 
 
+def vector_field_grayscale(model, t, x, y, grayscale_transform):
+    """
+    [NEW] Correctly computes eps_hat and divergence for a model that operates on a
+    grayscaled version of a 3-channel input. The divergence is computed with
+    respect to the original 3-channel space, which is critical for correctness.
+    """
+    x_clone = x.clone().requires_grad_(True)
+    t_in = torch.full((x.shape[0],), t, device=x.device, dtype=torch.float32)
+
+    # Apply grayscale transform *within* the gradient-enabled context
+    x_gray = grayscale_transform(x_clone)
+
+    # Get the 1-channel noise prediction from the shape model
+    eps_hat_1_channel = model(x_gray, t_in, y)
+
+    # Repeat the output to 3 channels to match the space of the evolving variable 'x'
+    eps_hat_3_channel = eps_hat_1_channel.repeat(1, 3, 1, 1)
+
+    # Compute divergence of the 3-channel output w.r.t the 3-channel input
+    eps_hutch = torch.randn_like(x_clone)
+    jvp_val = torch.autograd.grad(eps_hat_3_channel, x_clone, grad_outputs=eps_hutch, create_graph=False)[0]
+    divergence = (jvp_val * eps_hutch).sum(dim=(1, 2, 3))
+
+    return eps_hat_3_channel.detach(), divergence.detach()
+
+
 def get_kappa(t, divlogs, eps_hats, device):
-    """Calculates the weighting factor kappa based on scores."""
+    """
+    Calculates the composition weight kappa. This implementation correctly uses
+    scores (s = -eps/sigma) as per the paper's theory.
+    """
     divlog_1, divlog_2 = divlogs
     eps_hat_1, eps_hat_2 = eps_hats
 
+    # Ensure sigma_t is on the correct device and has the right shape
     sigma_t = sigma(t).to(device).view(-1, 1, 1, 1)
 
     # Convert noise predictions to scores: s = -eps_hat / sigma
@@ -78,9 +88,11 @@ def get_kappa(t, divlogs, eps_hats, device):
     div_s1 = -divlog_1.view(-1, 1, 1, 1) / sigma_t
     div_s2 = -divlog_2.view(-1, 1, 1, 1) / sigma_t
 
+    # This formula for kappa is faithful to the JAX implementation's intent
     kappa_num = div_s1 - div_s2 + (s1 * (s1 - s2)).sum(dim=(1, 2, 3), keepdim=True)
     kappa_den = ((s1 - s2) ** 2).sum(dim=(1, 2, 3), keepdim=True)
 
+    # Add a small epsilon to the denominator to prevent division by zero
     kappa = kappa_num / (kappa_den + 1e-9)
     return kappa
 
@@ -88,7 +100,8 @@ def get_kappa(t, divlogs, eps_hats, device):
 @torch.no_grad()
 def sample_composed_ito_ode(shape_model, color_model, shape_label, color_label, args):
     """
-    Performs reverse diffusion using the stable reverse ODE solver and kappa composition.
+    Performs reverse diffusion using the corrected probability flow ODE solver
+    and kappa-based composition.
     """
     device = Config.DEVICE
     shape_model.eval()
@@ -96,6 +109,7 @@ def sample_composed_ito_ode(shape_model, color_model, shape_label, color_label, 
 
     grayscale_transform = Grayscale(num_output_channels=1)
 
+    # Start from pure Gaussian noise
     x = torch.randn(args.bs, 3, args.img_size, args.img_size, device=device)
     dt = 1.0 / args.n_steps
 
@@ -103,35 +117,36 @@ def sample_composed_ito_ode(shape_model, color_model, shape_label, color_label, 
         t_val = 1.0 - i * dt
         t = torch.full((args.bs,), t_val, device=device)
 
+        # Enable gradients for divergence calculation
         with torch.enable_grad():
-            x_gray = grayscale_transform(x)
-            eps_hat_shape, div_shape = vector_field(shape_model, t_val, x_gray, shape_label)
+            # [FIXED] Use the new, correct function for the shape model
+            eps_hat_shape, div_shape = vector_field_grayscale(shape_model, t_val, x, shape_label, grayscale_transform)
+
+            # The color model's channels match, so we can use the simpler function
             eps_hat_color, div_color = vector_field(color_model, t_val, x, color_label)
 
-        # --- FIX: Scale the shape divergence to match the 3-channel output ---
-        # The divergence of the repeated tensor is 3x the divergence of the original.
-        div_shape = 3.0 * div_shape
-
-        # Broadcast the shape's noise prediction to 3 channels
-        eps_hat_shape_rgb = eps_hat_shape.repeat(1, 3, 1, 1)
-
-        # --- ODE Update Step (No gradients needed) ---
-        kappa = get_kappa(t, (div_shape, div_color), (eps_hat_shape_rgb, eps_hat_color), device)
+        # --- ODE Update Step (No gradients needed from here on) ---
+        kappa = get_kappa(t, (div_shape, div_color), (eps_hat_shape, eps_hat_color), device)
 
         # Convert noise predictions to scores
         sigma_t = sigma(t).view(-1, 1, 1, 1)
-        s_shape = -eps_hat_shape_rgb / sigma_t
+        s_shape = -eps_hat_shape / sigma_t
         s_color = -eps_hat_color / sigma_t
 
-        # Combine scores using kappa
+        # Combine scores using the calculated kappa
         s_combined = s_color + kappa * (s_shape - s_color)
 
-        # --- Stable Reverse ODE Update Rule ---
+        # --- [FIXED] Correct Reverse ODE Update Rule ---
         dlog_alpha_dt_t = dlog_alphadt(t).view(-1, 1, 1, 1)
-        beta_t = beta(t).view(-1, 1, 1, 1)
 
-        dxdt = dlog_alpha_dt_t * x - 0.5 * beta_t * s_combined
+        # Use the correct diffusion coefficient g2(t) instead of the old beta(t)
+        g2_t = g2(t).view(-1, 1, 1, 1)
 
+        # This is the probability flow ODE: dx = [f(x,t) - 0.5*g(t)^2*s(x,t)] dt
+        # where f(x,t) = dlog_alpha/dt * x
+        dxdt = dlog_alpha_dt_t * x - 0.5 * g2_t * s_combined
+
+        # Euler step
         x = x - dxdt * dt
 
     return x
@@ -142,7 +157,6 @@ def main(args):
     device = Config.DEVICE
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # --- Load Expert Models ---
     print("Loading expert models...")
     model_shape = UNet(in_channels=1, num_classes=len(Config.SHAPES)).to(device)
     model_color = UNet(in_channels=3, num_classes=len(Config.COLORS)).to(device)
@@ -150,8 +164,7 @@ def main(args):
     load_checkpoint(model_color, None, args.color_model_path, device)
     print("Models loaded successfully.")
 
-    # --- Generate a grid of all combinations ---
-    print("Generating a grid of all shape/color compositions using Itô-ODE method...")
+    print("Generating a grid of all shape/color compositions using the corrected Itô-ODE method...")
     print("WARNING: This will be slow due to JVP calculations for kappa.")
     all_generated_images = []
 
@@ -160,17 +173,17 @@ def main(args):
 
     for s_name in Config.SHAPES:
         for c_name in Config.COLORS:
+            print(f"Generating composition for: {s_name} (shape) and {c_name} (color)")
             s_idx = torch.full((args.bs,), shape_map[s_name], device=device, dtype=torch.long)
             c_idx = torch.full((args.bs,), color_map[c_name], device=device, dtype=torch.long)
 
             composed_image = sample_composed_ito_ode(model_shape, model_color, s_idx, c_idx, args)
             all_generated_images.append(composed_image)
 
-    # Save the results in a grid
     grid = torch.cat(all_generated_images)
-    grid_path = os.path.join(args.output_dir, "composition_grid_ito_ode.png")
+    grid_path = os.path.join(args.output_dir, "composition_grid_ito_ode_revised.png")
     save_image(grid, grid_path, nrow=len(Config.COLORS) * args.bs, normalize=True, value_range=(-1, 1))
-    print(f"\nSaved Itô-ODE generation grid to {grid_path}")
+    print(f"\nSaved revised Itô-ODE generation grid to {grid_path}")
 
 
 if __name__ == '__main__':
