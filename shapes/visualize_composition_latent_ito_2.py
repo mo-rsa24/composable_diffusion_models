@@ -64,7 +64,8 @@ def get_kappa(t, divlogs, eps_hats, device):
     kappa_num = div_s1 - div_s2 + (s1 * (s1 - s2)).sum(dim=1)
     kappa_den = ((s1 - s2) ** 2).sum(dim=1)
 
-    kappa = kappa_num / (kappa_den + 1e-9)
+    kappa = kappa_num / (kappa_den + 1e-5)
+    kappa = torch.clip(kappa, -1.0, 2.0)
     return kappa.view(-1, 1)
 
 
