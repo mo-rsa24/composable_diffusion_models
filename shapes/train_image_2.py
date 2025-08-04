@@ -11,6 +11,7 @@ from tqdm import tqdm
 # We only need q_t, sigma, and alpha for the training and validation logic.
 from schedule_2 import q_t, sigma, alpha
 
+
 from models.unet_small import UNet
 from shapes.dataset import ShapesDataset
 from src.utils.tools import tiny_subset
@@ -84,7 +85,7 @@ def main(args):
     sanity_num_examples = 8
 
     model_dir = Path(os.path.dirname(args.model_path))
-    output_dir = Path("output_shapes")
+    output_dir = Path("final_output_shapes_2")
     model_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
 
