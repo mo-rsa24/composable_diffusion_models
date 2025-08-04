@@ -11,8 +11,6 @@ from torchvision.utils import save_image
 from models.mlp_2d import MLP
 from utils import load_checkpoint, set_seed
 from shapes.dataset_ import ShapesDataset
-
-# --- [REVISED] Import beta(t) for the JAX-faithful ODE solver ---
 from schedule_jax_faithful import alpha, sigma, dlog_alphadt, beta
 
 
@@ -26,19 +24,27 @@ def q_t_latent(x0, t, eps=None):
 
 
 def vector_field(model, t, x):
-    """Computes the model output (eps_hat) and its divergence."""
+    """
+    Computes the model output (eps_hat) and its divergence.
+    """
     x_clone = x.clone().requires_grad_(True)
     t_in = torch.full((x.shape[0],), t, device=x.device)
     eps_hat = model(t_in, x_clone)
-    eps_hutch = torch.randn_like(x_clone)
+
+    # --- [FINAL FIX] Use Rademacher vectors for Hutchinson's estimator ---
+    # The JAX reference uses Rademacher {-1, 1} vectors, not Gaussian.
+    # This is the final discrepancy that needs to be aligned.
+    eps_hutch = torch.randint_like(x_clone, 0, 2, dtype=torch.float) * 2 - 1
+
     jvp_val = torch.autograd.grad(eps_hat, x_clone, grad_outputs=eps_hutch, create_graph=False)[0]
     divergence = (jvp_val * eps_hutch).sum(dim=1)
+
     return eps_hat.detach(), divergence.detach()
 
 
 def get_kappa(t, div_eps_hats, eps_hats, device):
     """
-    [CORRECTED] Calculates kappa using a faithful translation of the JAX formula.
+    Calculates kappa using a faithful translation of the JAX formula.
     """
     div_eps_hat_1, div_eps_hat_2 = div_eps_hats
     eps_hat_1, eps_hat_2 = eps_hats
@@ -47,7 +53,7 @@ def get_kappa(t, div_eps_hats, eps_hats, device):
     term1_num = -sigma_t * (div_eps_hat_1 - div_eps_hat_2).view(-1, 1)
     term2_num = torch.sum(eps_hat_1 * (eps_hat_1 - eps_hat_2), dim=1, keepdim=True)
     kappa_num = term1_num + term2_num
-    kappa_den = torch.sum((eps_hat_1 - eps_hat_2)**2, dim=1, keepdim=True)
+    kappa_den = torch.sum((eps_hat_1 - eps_hat_2) ** 2, dim=1, keepdim=True)
     kappa = kappa_num / (kappa_den + 1e-5)
     return torch.clip(kappa, -1.0, 2.0)
 
@@ -90,7 +96,7 @@ x_gen_history = {}
 x = torch.randn(N_SAMPLES, 2, device=DEVICE)
 dt = 1.0 / N_STEPS
 
-for i in trange(N_STEPS, desc="Generating with Superposition (JAX-Faithful)"):
+for i in trange(N_STEPS, desc="Generating with Superposition (Fully Corrected)"):
     t_val = 1.0 - i * dt
     t = torch.full((N_SAMPLES,), t_val, device=DEVICE)
 
@@ -102,32 +108,22 @@ for i in trange(N_STEPS, desc="Generating with Superposition (JAX-Faithful)"):
 
     with torch.no_grad():
         kappa = get_kappa(t, (div_shape, div_color), (eps_hat_shape, eps_hat_color), DEVICE)
-
-        # The JAX notebook combines the noise predictions (sdlogqdx = -eps_hat)
-        # combined_eps_hat = (1-kappa)*eps_hat_color + kappa*eps_hat_shape
         combined_eps_hat = eps_hat_color + kappa * (eps_hat_shape - eps_hat_color)
 
-        # --- [REVISED] JAX-Faithful Reverse ODE Update Rule ---
-        # This rule now uses the custom beta(t) function from the JAX notebook,
-        # ensuring the dynamics are perfectly consistent with the kappa calculation.
         dlog_alpha_dt_t = dlog_alphadt(t).view(-1, 1)
         beta_t = beta(t).view(-1, 1)
 
-        # dxdt = dlog_alphadt*x - beta(t)*(-combined_eps_hat)
         dxdt = dlog_alpha_dt_t * x + beta_t * combined_eps_hat
-
         x = x - dxdt * dt
 
 x_gen_final = x
 x_gen_history[0.0] = x_gen_final.cpu().numpy()
 
 # --- 4. Plot the Latent Space Reverse Process ---
-# (Plotting code remains the same logic, but with a bug fix for tensor sizes)
 print("Plotting the latent space reverse process...")
 fig, axes = plt.subplots(1, 6, figsize=(24, 4), sharex=True, sharey=True)
 plot_times = sorted(x_gen_history.keys(), reverse=True)
 
-# Determine plot limits dynamically
 all_points_for_limit = [x0_up.cpu().numpy(), x0_down.cpu().numpy()]
 for t_val in plot_times:
     all_points_for_limit.append(x_gen_history[t_val])
@@ -139,7 +135,6 @@ for i, t_val in enumerate(plot_times):
     ax = axes[i]
     xt_gen = x_gen_history[t_val]
 
-    # [FIXED] Create a correctly-sized time tensor for each dataset
     t_tensor_up = torch.full((x0_up.shape[0],), t_val, device=DEVICE)
     xt_up, _ = q_t_latent(x0_up, t_tensor_up)
 
@@ -155,16 +150,16 @@ for i, t_val in enumerate(plot_times):
     ax.set_ylim(-plot_limit, plot_limit)
 
 axes[0].legend()
-fig.suptitle("Superposition Reverse Diffusion (JAX-Faithful AND Composition)", fontsize=16)
+fig.suptitle("Superposition Reverse Diffusion (Fully Corrected AND Composition)", fontsize=16)
 plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-plt.savefig(os.path.join(OUTPUT_DIR, "latent_composition_process_final_corrected.png"))
+plt.savefig(os.path.join(OUTPUT_DIR, "latent_composition_process_fully_corrected.png"))
 plt.close()
-print(f"Latent visualization saved to {os.path.join(OUTPUT_DIR, 'latent_composition_process_final_corrected.png')}")
+print(f"Latent visualization saved to {os.path.join(OUTPUT_DIR, 'latent_composition_process_fully_corrected.png')}")
 
 # --- 5. Decode Final Latent Points back to Images ---
-# (Decoding code remains the same)
 print("Decoding final latent points back to images...")
 img_flat = pca.inverse_transform(x_gen_final.cpu().numpy())
 img_reconstructed = torch.from_numpy(img_flat).view(-1, 3, 64, 64)
-save_image(img_reconstructed.clamp(-1, 1), os.path.join(OUTPUT_DIR, "reconstructed_images_final_corrected.png"), nrow=16, normalize=True, value_range=(-1, 1))
-print(f"Reconstructed images saved to {os.path.join(OUTPUT_DIR, 'reconstructed_images_final_corrected.png')}")
+save_image(img_reconstructed.clamp(-1, 1), os.path.join(OUTPUT_DIR, "reconstructed_images_fully_corrected.png"),
+           nrow=16, normalize=True, value_range=(-1, 1))
+print(f"Reconstructed images saved to {os.path.join(OUTPUT_DIR, 'reconstructed_images_fully_corrected.png')}")
