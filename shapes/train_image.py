@@ -189,7 +189,7 @@ if __name__ == '__main__':
     parser.add_argument('--training_mode', type=str, required=True, choices=['shape', 'color'],
                         help="The expert to train.")
     parser.add_argument('--model_path', type=str, required=True, help="Path to save the trained model checkpoint.")
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=500)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=2e-4)
     parser.add_argument('--img_size', type=int, default=64)
