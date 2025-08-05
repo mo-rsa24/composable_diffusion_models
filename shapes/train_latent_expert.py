@@ -10,7 +10,8 @@ import argparse
 # Assuming these modules are in the correct paths
 from models.mlp_2d import MLP
 from schedule_jax_faithful import alpha, sigma
-from shapes.dataset_ import ShapesDataset
+# from shapes.dataset_ import ShapesDataset
+from shapes.dataset_grayscale import ShapesGrayscaleDataset as ShapesDataset
 from utils import set_seed, save_checkpoint
 
 
@@ -41,7 +42,7 @@ def main(args):
 
     full_dataset = ShapesDataset(size=10000)
     full_dataloader = DataLoader(full_dataset, batch_size=len(full_dataset))
-    all_images, all_shape_labels, _ = next(iter(full_dataloader))
+    all_images, all_shape_labels = next(iter(full_dataloader))
     images_flat = all_images.view(all_images.size(0), -1).numpy()
     latent_codes = pca.transform(images_flat)
 
