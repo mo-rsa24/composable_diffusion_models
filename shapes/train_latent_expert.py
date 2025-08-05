@@ -33,7 +33,7 @@ def main(args):
     # Ensure the directory for the model and PCA file exists
     checkpoint_dir = os.path.dirname(args.model_path)
     os.makedirs(checkpoint_dir, exist_ok=True)
-    PCA_MODEL_PATH = os.path.join(checkpoint_dir, "pca_shapes.joblib")
+    PCA_MODEL_PATH = os.path.join(checkpoint_dir, "pca_grayscale.joblib")
 
     # --- 1. Load PCA and Project Data ---
     print(f"Loading PCA from {PCA_MODEL_PATH}")
